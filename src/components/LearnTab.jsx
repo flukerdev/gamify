@@ -47,6 +47,14 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
     }
   }
 
+  // Points actually banked to the ledger during THIS Learn visit. We sum the
+  // server's per-answer `pointsEarned` (which is 0 for an already-paid card)
+  // rather than trusting a server-side "since last exit" watermark — that
+  // watermark only advanced on one exit path and reset on a new run, so it
+  // drifted and made the exit popup overstate (e.g. showed "+5" for points
+  // earned across earlier sessions). Resets to 0 on each mount / game switch.
+  const sessionBankedRef = useRef(0);
+
   async function load() {
     try {
       const r = await api.get(`/api/games/${game.id}/learn`);
@@ -62,6 +70,7 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
   }
   useEffect(() => {
     progressRef.current = false;
+    sessionBankedRef.current = 0;
     onProgressChange?.(false);
     load();
   }, [game.id]);
@@ -74,18 +83,19 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
     return () => onActiveChange?.(false);
   }, [state, phase]);
 
-  // Expose a confirmExit() the shell can invoke to ask the server how many
-  // points were banked since the last exit, and to advance the bank watermark.
+  // Expose a confirmExit() the shell can invoke on exit. The popup figure is
+  // the points actually banked this visit (sessionBankedRef), not the server's
+  // watermark. We still POST /learn/exit so the server keeps its own bookkeeping
+  // consistent, but we ignore its returned figure for display.
   // The shell also installs an openPrompt() on the same ref — patch, don't
   // overwrite.
   useEffect(() => {
     if (!exitRef) return;
     exitRef.current = exitRef.current || {};
     exitRef.current.confirmExit = async () => {
-      try {
-        const r = await api.post(`/api/games/${game.id}/learn/exit`, {});
-        return r;
-      } catch { return { bankedSinceLastExit: 0 }; }
+      const banked = sessionBankedRef.current;
+      try { await api.post(`/api/games/${game.id}/learn/exit`, {}); } catch { /* bookkeeping only */ }
+      return { bankedSinceLastExit: banked };
     };
   }, [exitRef, game.id]);
 
@@ -121,6 +131,7 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
         pairId: nextCard.pairId, isCorrect,
       });
       setState(r.state); setBuckets(r.buckets); setSecondsRemaining(r.secondsRemaining);
+      if (r.pointsEarned) sessionBankedRef.current += Number(r.pointsEarned);
       if (r.graduated || r.mastered) markProgress();
       if (r.sessionSummary) {
         setSessionSummary(r.sessionSummary);
