@@ -239,6 +239,12 @@ create index if not exists idx_users_timezone_active on users(timezone)
 alter table games add column if not exists last_notified_ranks jsonb
   not null default '{}'::jsonb;
 
+-- Per-game JSONB { user_id: iso-timestamp } of the last "X passed you" push we
+-- sent each member. Used to throttle: at most one passed-you push per member
+-- per game within PASSED_NOTIFY_COOLDOWN_MS (see api/_app.js).
+alter table games add column if not exists last_passed_notified jsonb
+  not null default '{}'::jsonb;
+
 -- Email magic-code OTPs. We store sha256(code), never plaintext.
 -- TTL is enforced in the verify endpoint (10 min) and via the expires_at index
 -- for cleanup. attempts caps brute-force guessing.

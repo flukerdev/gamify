@@ -651,22 +651,25 @@ async function sendOrCleanup(userId, deviceToken, payload) {
   }
 }
 
-// Read the full population of "send-eligible" users once per cron run.
-// Filters mirror the partial index idx_users_timezone_active.
+// Read the full population of "send-eligible" users once per cron run: live
+// users with a registered device token. We no longer exclude null-timezone
+// users here — the daily-quiz handler falls back to Eastern, so a missing tz
+// no longer silently drops a user from the reminder. (streak-danger keeps
+// skipping null-tz users, since `localPartsInTz(null)` returns null.)
 async function loadNotifiableUsers() {
   const { data, error } = await supabase.from('users')
     .select('id, first_name, apns_device_token, timezone, notification_prefs')
     .is('deleted_at', null)
-    .not('apns_device_token', 'is', null)
-    .not('timezone', 'is', null);
+    .not('apns_device_token', 'is', null);
   if (error) throw error;
   return data || [];
 }
 
-// Hourly. Targets users for whom it is currently 8:00 in their stored tz,
-// who have notification_prefs.daily ≠ false, and who have NOT logged any
-// activity today (in ET, since activity_log.date_et is always ET — close
-// enough; the cron only fires on each hour boundary anyway).
+// Hourly. Targets users for whom it is currently 8:00 in their stored tz
+// (or Eastern, if they have no stored tz), who have notification_prefs.daily
+// ≠ false, and who have NOT logged any activity today (in ET, since
+// activity_log.date_et is always ET — close enough; the cron only fires on
+// each hour boundary anyway).
 async function runDailyQuizCron() {
   const now = new Date();
   const today = easternDateString(now);
@@ -675,7 +678,10 @@ async function runDailyQuizCron() {
   for (const u of users) {
     const prefs = u.notification_prefs || {};
     if (prefs.daily === false) { skipped++; continue; }
-    const parts = localPartsInTz(u.timezone, now);
+    // Fall back to Eastern for users with no/invalid stored timezone, so a
+    // missing tz no longer excludes them from the daily reminder.
+    const parts = localPartsInTz(u.timezone, now)
+      || localPartsInTz('America/New_York', now);
     if (!parts || parts.hour !== 8) { skipped++; continue; }
     const { count, error: cErr } = await supabase.from('activity_log')
       .select('*', { count: 'exact', head: true })
@@ -729,15 +735,22 @@ async function runStreakDangerCron() {
   return { sent, skipped, considered: users.length };
 }
 
+// At most one "X passed you" push per member per game within this window, so
+// an active game can't ping a falling player every 10 minutes.
+const PASSED_NOTIFY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 // Every 10 minutes. For each game with recent point activity, recompute
 // ranks and compare to the snapshot in games.last_notified_ranks. Every
 // member whose new rank is worse (number got larger) gets a push naming
-// whoever now sits at the rank they used to hold. On the first run for a
-// game (bootstrap), we just record current ranks without sending.
+// whoever now sits at the rank they used to hold — throttled per member by
+// PASSED_NOTIFY_COOLDOWN_MS. On the first run for a game (bootstrap), we just
+// record current ranks without sending.
 async function runLeaderboardChangesCron() {
   // Constrain to games with new points since the last few cron runs. The
   // 30m cutoff covers 10-min schedule jitter and clock skew.
-  const cutoffIso = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  const cutoffIso = new Date(now - 30 * 60 * 1000).toISOString();
   const { data: recent, error: lErr } = await supabase
     .from('points_ledger').select('game_id').gte('earned_at', cutoffIso);
   if (lErr) throw lErr;
@@ -745,7 +758,7 @@ async function runLeaderboardChangesCron() {
   if (activeGameIds.length === 0) return { games: 0, sent: 0 };
 
   const { data: games, error: gErr } = await supabase.from('games')
-    .select('id, title, last_notified_ranks').in('id', activeGameIds);
+    .select('id, title, last_notified_ranks, last_passed_notified').in('id', activeGameIds);
   if (gErr) throw gErr;
 
   let sent = 0;
@@ -758,10 +771,13 @@ async function runLeaderboardChangesCron() {
     const { data: members } = await supabase.from('users')
       .select('id, first_name, last_name, apns_device_token, notification_prefs, deleted_at')
       .in('id', memberIds);
-    const { data: ledger } = await supabase.from('points_ledger')
-      .select('user_id, points').eq('game_id', game.id);
-    const totals = new Map();
-    for (const r of ledger || []) totals.set(r.user_id, (totals.get(r.user_id) || 0) + Number(r.points));
+    // Pre-aggregated per-user totals (see leaderboard route): avoids the
+    // 1000-row truncation that would skew "X passed you" rank calculations.
+    const { data: totalsRows } = await supabase.from('v_user_game_totals')
+      .select('user_id, total_points').eq('game_id', game.id);
+    const totals = new Map(
+      (totalsRows || []).map(r => [r.user_id, Number(r.total_points)]),
+    );
 
     const rows = (members || []).map(m => ({
       userId: m.id,
@@ -783,6 +799,7 @@ async function runLeaderboardChangesCron() {
     });
 
     const prev = game.last_notified_ranks || {};
+    const lastPassed = game.last_passed_notified || {};
     const isBootstrap = Object.keys(prev).length === 0;
 
     if (!isBootstrap) {
@@ -793,6 +810,9 @@ async function runLeaderboardChangesCron() {
         const newRank = currentRanks[r.userId];
         if (prevRank == null) continue;       // brand-new member; nobody passed them
         if (newRank <= prevRank) continue;    // didn't drop
+        // Throttle: at most one passed-you push per member per game per window.
+        const lastAt = lastPassed[r.userId];
+        if (lastAt && (now - new Date(lastAt).getTime()) < PASSED_NOTIFY_COOLDOWN_MS) continue;
         const passer = userByRank[prevRank];
         if (!passer || passer.userId === r.userId) continue;
         const passerName = passer.firstName || 'Someone';
@@ -801,12 +821,13 @@ async function runLeaderboardChangesCron() {
           body: `${passerName} just passed you in ${game.title || 'your game'}.`,
           data: { type: 'leaderboard-changes', gameId: game.id },
         });
-        if (ok) sent++;
+        if (ok) { sent++; lastPassed[r.userId] = nowIso; }
       }
     }
 
     const { error: uErr } = await supabase.from('games')
-      .update({ last_notified_ranks: currentRanks }).eq('id', game.id);
+      .update({ last_notified_ranks: currentRanks, last_passed_notified: lastPassed })
+      .eq('id', game.id);
     if (uErr) throw uErr;
   }
   return { games: (games || []).length, sent };
@@ -1195,13 +1216,15 @@ app.get('/api/games/:id/leaderboard', async (req, res) => {
     const { data: users } = await supabase.from('users')
       .select('id, first_name, last_name').in('id', memberIds.length ? memberIds : ['00000000-0000-0000-0000-000000000000']);
 
-    const { data: ledger } = await supabase.from('points_ledger')
-      .select('user_id, points').eq('game_id', id);
-
-    const totals = new Map();
-    (ledger || []).forEach(r => {
-      totals.set(r.user_id, (totals.get(r.user_id) || 0) + Number(r.points));
-    });
+    // Read pre-aggregated per-user totals from the DB view (one row per user).
+    // Summing raw points_ledger here instead would silently truncate at
+    // PostgREST's 1000-row cap once a game exceeds 1000 ledger entries, which
+    // is what made the leaderboard lag behind the (per-user) profile total.
+    const { data: totalsRows } = await supabase.from('v_user_game_totals')
+      .select('user_id, total_points').eq('game_id', id);
+    const totals = new Map(
+      (totalsRows || []).map(r => [r.user_id, Number(r.total_points)]),
+    );
 
     let rows = (users || []).map(u => ({
       userId: u.id,
@@ -1806,9 +1829,11 @@ app.get('/api/games/:id/profile', async (req, res) => {
       .select('user_id').eq('user_id', user.id).eq('game_id', id).maybeSingle();
     if (!mem) return res.status(403).json({ error: 'Not in this game.' });
 
-    const { data: ledger } = await supabase.from('points_ledger')
-      .select('points').eq('user_id', user.id).eq('game_id', id);
-    const totalPoints = (ledger || []).reduce((s, r) => s + Number(r.points), 0);
+    // Same source as the leaderboard (v_user_game_totals) so the profile total
+    // and the leaderboard total are identical by construction and can't drift.
+    const { data: totalsRow } = await supabase.from('v_user_game_totals')
+      .select('total_points').eq('user_id', user.id).eq('game_id', id).maybeSingle();
+    const totalPoints = Number(totalsRow?.total_points || 0);
 
     const { data: activity } = await supabase.from('activity_log')
       .select('date_et').eq('user_id', user.id).eq('game_id', id);

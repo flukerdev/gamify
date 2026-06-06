@@ -76,15 +76,15 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
 
   // The "X" inside LearnTab opens the same prompt. We expose openPrompt via
   // the same exitRef LearnTab fills. The X has no chosen destination, so
-  // default to Profile after dismiss.
+  // default to the Leaderboard after dismiss.
   useEffect(() => {
     learnExitRef.current.openPrompt = () => {
       if (!learnProgress) {
-        // No progress yet — exit immediately to Profile, no prompt, no popup.
-        applyNav({ kind: 'tab', value: 'profile' });
+        // No progress yet — exit immediately to the Leaderboard, no prompt, no popup.
+        applyNav({ kind: 'tab', value: 'leaderboard' });
         return;
       }
-      setPendingNav({ kind: 'tab', value: 'profile' });
+      setPendingNav({ kind: 'tab', value: 'leaderboard' });
       setExitStage('confirm');
     };
   }, [learnProgress]);
@@ -127,7 +127,7 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
     }
   }
   function finishExitNav() {
-    const nav = pendingNav || { kind: 'tab', value: 'profile' };
+    const nav = pendingNav || { kind: 'tab', value: 'leaderboard' };
     setExitStage(null);
     setPendingNav(null);
     applyNav(nav);
