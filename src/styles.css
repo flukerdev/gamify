@@ -300,9 +300,19 @@ code { background: var(--surface-2); padding: 1px 6px; border-radius: 4px; font-
   box-shadow: var(--shadow-1);
 }
 .profile-stats {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 24px;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0 24px;
 }
 @media (max-width: 480px) { .profile-stats { grid-template-columns: 1fr; } }
+
+/* Progress toward the next tier — sits under the tier pill. */
+.tier-progress { margin: 4px 0 0; }
+.tier-progress-label { margin-bottom: 6px; }
+.tier-progress-track {
+  height: 8px; border-radius: 999px; background: var(--line); overflow: hidden;
+}
+.tier-progress-fill {
+  height: 100%; border-radius: 999px; transition: width 0.4s ease;
+}
 .stat-card {
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
   padding: 18px;
