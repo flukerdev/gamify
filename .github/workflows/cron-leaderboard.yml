@@ -1,14 +1,15 @@
 name: Leaderboard change notifications
 
-# Every 10 minutes (UTC). See cron-hourly.yml for the why-GitHub-Actions
-# context and the one-time CRON_SECRET setup steps.
-#
-# The /leaderboard-changes endpoint short-circuits if there's been no
-# points_ledger activity in the last 30 minutes, so most runs are cheap.
+# Once a day at 14:00 Eastern. Fires at 18:00 UTC (= 2pm EDT) and 19:00 UTC
+# (= 2pm EST); the handler's ET-hour guard makes only the run that is actually
+# 2pm ET send. For each game it compares current ranks to the snapshot from the
+# previous day's run and notifies anyone who dropped, naming who passed them.
+# Manual "Run workflow" passes ?force=1 to bypass the hour guard for testing.
+# See cron-daily-quiz.yml for CRON_SECRET / auto-disable notes.
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '0 18,19 * * *'
   workflow_dispatch:
 
 jobs:
@@ -18,7 +19,8 @@ jobs:
       - name: POST /api/cron/notifications/leaderboard-changes
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '?force=1' || '' }}
         run: |
           curl -sS --fail-with-body \
-            -X POST https://gamify-matflukers-projects.vercel.app/api/cron/notifications/leaderboard-changes \
+            -X POST "https://gamify-matflukers-projects.vercel.app/api/cron/notifications/leaderboard-changes${FORCE}" \
             -H "Authorization: Bearer $CRON_SECRET"

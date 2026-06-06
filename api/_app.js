@@ -665,24 +665,23 @@ async function loadNotifiableUsers() {
   return data || [];
 }
 
-// Hourly. Targets users for whom it is currently 8:00 in their stored tz
-// (or Eastern, if they have no stored tz), who have notification_prefs.daily
-// ≠ false, and who have NOT logged any activity today (in ET, since
-// activity_log.date_et is always ET — close enough; the cron only fires on
-// each hour boundary anyway).
-async function runDailyQuizCron() {
+// Once a day at 07:00 Eastern. The GitHub Actions schedule fires at both 11:00
+// and 12:00 UTC (to cover EDT/EST); this single ET-hour guard makes only the
+// 7am-ET run actually send — no per-user timezone math. Targets every
+// notifiable user whose notification_prefs.daily ≠ false and who has NOT
+// logged any activity today (ET). `force` bypasses the hour guard for testing.
+async function runDailyQuizCron({ force } = {}) {
   const now = new Date();
+  const et = localPartsInTz('America/New_York', now);
+  if (!force && (!et || et.hour !== 7)) {
+    return { sent: 0, skipped: 0, considered: 0, skippedReason: 'off-hour' };
+  }
   const today = easternDateString(now);
   const users = await loadNotifiableUsers();
   let sent = 0, skipped = 0;
   for (const u of users) {
     const prefs = u.notification_prefs || {};
     if (prefs.daily === false) { skipped++; continue; }
-    // Fall back to Eastern for users with no/invalid stored timezone, so a
-    // missing tz no longer excludes them from the daily reminder.
-    const parts = localPartsInTz(u.timezone, now)
-      || localPartsInTz('America/New_York', now);
-    if (!parts || parts.hour !== 8) { skipped++; continue; }
     const { count, error: cErr } = await supabase.from('activity_log')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', u.id).eq('date_et', today);
@@ -698,18 +697,22 @@ async function runDailyQuizCron() {
   return { sent, skipped, considered: users.length };
 }
 
-// Hourly. Fires at Saturday 18:00 local-tz for users with a live streak last
-// week (≥1 activity Sun-Sat last week) but no activity this week so far.
-async function runStreakDangerCron() {
+// Once a week, Saturday 12:00 Eastern. Schedule fires 16:00 & 17:00 UTC Sat
+// (EDT/EST); the ET guard selects noon ET. Sends to users with a live streak
+// last week (≥1 activity Sun-Sat last week) but no activity this week so far.
+// `force` bypasses the day/hour guard for testing.
+async function runStreakDangerCron({ force } = {}) {
   const now = new Date();
+  const et = localPartsInTz('America/New_York', now);
+  if (!force && (!et || et.weekday !== 'Sat' || et.hour !== 12)) {
+    return { sent: 0, skipped: 0, considered: 0, skippedReason: 'off-hour' };
+  }
   const week = easternWeekRange(now);
   const users = await loadNotifiableUsers();
   let sent = 0, skipped = 0;
   for (const u of users) {
     const prefs = u.notification_prefs || {};
     if (prefs.streak === false) { skipped++; continue; }
-    const parts = localPartsInTz(u.timezone, now);
-    if (!parts || parts.weekday !== 'Sat' || parts.hour !== 18) { skipped++; continue; }
 
     const { count: thisCount, error: e1 } = await supabase.from('activity_log')
       .select('*', { count: 'exact', head: true })
@@ -735,30 +738,21 @@ async function runStreakDangerCron() {
   return { sent, skipped, considered: users.length };
 }
 
-// At most one "X passed you" push per member per game within this window, so
-// an active game can't ping a falling player every 10 minutes.
-const PASSED_NOTIFY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 hours
-
-// Every 10 minutes. For each game with recent point activity, recompute
-// ranks and compare to the snapshot in games.last_notified_ranks. Every
-// member whose new rank is worse (number got larger) gets a push naming
-// whoever now sits at the rank they used to hold — throttled per member by
-// PASSED_NOTIFY_COOLDOWN_MS. On the first run for a game (bootstrap), we just
-// record current ranks without sending.
-async function runLeaderboardChangesCron() {
-  // Constrain to games with new points since the last few cron runs. The
-  // 30m cutoff covers 10-min schedule jitter and clock skew.
-  const now = Date.now();
-  const nowIso = new Date(now).toISOString();
-  const cutoffIso = new Date(now - 30 * 60 * 1000).toISOString();
-  const { data: recent, error: lErr } = await supabase
-    .from('points_ledger').select('game_id').gte('earned_at', cutoffIso);
-  if (lErr) throw lErr;
-  const activeGameIds = [...new Set((recent || []).map(r => r.game_id))];
-  if (activeGameIds.length === 0) return { games: 0, sent: 0 };
+// Once a day at 14:00 Eastern. Schedule fires 18:00 & 19:00 UTC (EDT/EST); the
+// ET guard selects 2pm ET. For every game, compare current ranks to the
+// snapshot taken at the previous daily run (≈24h ago) and notify each member
+// who dropped, naming whoever now holds the rank they used to hold. The first
+// run per game bootstraps the snapshot without sending. `force` bypasses the
+// hour guard for testing.
+async function runLeaderboardChangesCron({ force } = {}) {
+  const now = new Date();
+  const et = localPartsInTz('America/New_York', now);
+  if (!force && (!et || et.hour !== 14)) {
+    return { games: 0, sent: 0, skippedReason: 'off-hour' };
+  }
 
   const { data: games, error: gErr } = await supabase.from('games')
-    .select('id, title, last_notified_ranks, last_passed_notified').in('id', activeGameIds);
+    .select('id, title, last_notified_ranks');
   if (gErr) throw gErr;
 
   let sent = 0;
@@ -799,7 +793,6 @@ async function runLeaderboardChangesCron() {
     });
 
     const prev = game.last_notified_ranks || {};
-    const lastPassed = game.last_passed_notified || {};
     const isBootstrap = Object.keys(prev).length === 0;
 
     if (!isBootstrap) {
@@ -809,10 +802,7 @@ async function runLeaderboardChangesCron() {
         const prevRank = prev[r.userId];
         const newRank = currentRanks[r.userId];
         if (prevRank == null) continue;       // brand-new member; nobody passed them
-        if (newRank <= prevRank) continue;    // didn't drop
-        // Throttle: at most one passed-you push per member per game per window.
-        const lastAt = lastPassed[r.userId];
-        if (lastAt && (now - new Date(lastAt).getTime()) < PASSED_NOTIFY_COOLDOWN_MS) continue;
+        if (newRank <= prevRank) continue;    // didn't drop since yesterday
         const passer = userByRank[prevRank];
         if (!passer || passer.userId === r.userId) continue;
         const passerName = passer.firstName || 'Someone';
@@ -821,13 +811,12 @@ async function runLeaderboardChangesCron() {
           body: `${passerName} just passed you in ${game.title || 'your game'}.`,
           data: { type: 'leaderboard-changes', gameId: game.id },
         });
-        if (ok) { sent++; lastPassed[r.userId] = nowIso; }
+        if (ok) sent++;
       }
     }
 
     const { error: uErr } = await supabase.from('games')
-      .update({ last_notified_ranks: currentRanks, last_passed_notified: lastPassed })
-      .eq('id', game.id);
+      .update({ last_notified_ranks: currentRanks }).eq('id', game.id);
     if (uErr) throw uErr;
   }
   return { games: (games || []).length, sent };
@@ -839,7 +828,11 @@ function registerCron(path, handler) {
   const wrapped = async (req, res) => {
     try {
       requireCron(req);
-      const result = await handler();
+      // `?force=1` bypasses a handler's time-of-day guard so a manual
+      // workflow_dispatch (or curl) can exercise the send path outside the
+      // scheduled ET window. Per-user guards (already-played, prefs) still apply.
+      const force = req.query.force === '1' || req.query.force === 'true';
+      const result = await handler({ force });
       res.json({ ok: true, ...result });
     } catch (e) { sendError(res, e); }
   };

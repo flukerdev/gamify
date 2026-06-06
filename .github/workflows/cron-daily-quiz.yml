@@ -1,0 +1,29 @@
+name: Daily Quiz notification
+
+# Once a day at 07:00 Eastern. GitHub Actions cron is UTC and does NOT observe
+# DST, so we fire at BOTH 11:00 UTC (= 7am EDT) and 12:00 UTC (= 7am EST); the
+# handler's ET-hour guard makes only the run that is actually 7am ET send, the
+# other no-ops. Manual "Run workflow" passes ?force=1 to bypass the guard so
+# you can test any time (per-user guards like already-played still apply).
+#
+# CRON_SECRET setup: repo → Settings → Secrets and variables → Actions, same
+# value as the Vercel env var. Scheduled workflows auto-disable after 60 days
+# with no commits — push something or re-enable from the Actions tab.
+
+on:
+  schedule:
+    - cron: '0 11,12 * * *'
+  workflow_dispatch:
+
+jobs:
+  daily-quiz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/cron/notifications/daily-quiz
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '?force=1' || '' }}
+        run: |
+          curl -sS --fail-with-body \
+            -X POST "https://gamify-matflukers-projects.vercel.app/api/cron/notifications/daily-quiz${FORCE}" \
+            -H "Authorization: Bearer $CRON_SECRET"

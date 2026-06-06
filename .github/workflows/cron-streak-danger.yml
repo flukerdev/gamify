@@ -1,0 +1,25 @@
+name: Streak-danger notification
+
+# Once a week, Saturday 12:00 Eastern. Fires at 16:00 UTC (= noon EDT) and
+# 17:00 UTC (= noon EST) on Saturdays; the handler's ET day/hour guard makes
+# only the run that is actually Saturday noon ET send. Manual "Run workflow"
+# passes ?force=1 to bypass the guard (the live-streak conditions still apply).
+# See cron-daily-quiz.yml for CRON_SECRET / auto-disable notes.
+
+on:
+  schedule:
+    - cron: '0 16,17 * * 6'
+  workflow_dispatch:
+
+jobs:
+  streak-danger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/cron/notifications/streak-danger
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '?force=1' || '' }}
+        run: |
+          curl -sS --fail-with-body \
+            -X POST "https://gamify-matflukers-projects.vercel.app/api/cron/notifications/streak-danger${FORCE}" \
+            -H "Authorization: Bearer $CRON_SECRET"
