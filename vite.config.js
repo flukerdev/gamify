@@ -34,8 +34,8 @@ export default defineConfig(({ mode }) => {
         transformIndexHtml(html) {
           if (!siteUrl) return html;
           return html
-            .replaceAll('content="/og.svg"', `content="${siteUrl}/og.svg"`)
-            .replaceAll('href="/og.svg"', `href="${siteUrl}/og.svg"`)
+            .replaceAll('content="/og.png"', `content="${siteUrl}/og.png"`)
+            .replaceAll('href="/apple-touch-icon.png"', `href="${siteUrl}/apple-touch-icon.png"`)
             .replaceAll('href="/favicon.svg"', `href="${siteUrl}/favicon.svg"`);
         },
       },
