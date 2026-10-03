@@ -50,12 +50,11 @@ export function verifySession(token) {
   } catch { return null; }
 }
 
-// Passcodes are compared case-insensitively and ignore spaces, so "Sts 2026"
-// and "sts2026" are the same passcode. Keep in sync with the SQL used to seed
-// a protected game:
-//   encode(digest('gamify-passcode:' || lower(regexp_replace(code, '\s+', '', 'g')), 'sha256'), 'hex')
+// Passcodes are forgiving to type: only letters and digits count, in any
+// case. "Names-7K3M 9XQP", "names 7k3m-9xqp" and "names7k3m9xqp" are all the
+// same passcode. (Minimum lengths therefore count letters and digits only.)
 export function normalizePasscode(input) {
-  return String(input ?? '').replace(/\s+/g, '').toLowerCase();
+  return String(input ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 }
 export function hashPasscode(input) {
   return crypto.createHash('sha256')

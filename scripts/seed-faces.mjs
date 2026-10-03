@@ -27,6 +27,10 @@ assertEnv();
 const roster = JSON.parse(fs.readFileSync(path.join(dir, 'roster.json'), 'utf8'));
 const die = (label, error) => { console.error(`FAILED ${label}:`, error?.message || error); process.exit(1); };
 
+// Passcodes may come from the environment so they never have to be written
+// into a file: STS_STAFF_PASSCODE / STS_ADMIN_PASSCODE override roster.json.
+roster.staffPasscode = process.env.STS_STAFF_PASSCODE || roster.staffPasscode;
+roster.adminPasscode = process.env.STS_ADMIN_PASSCODE || roster.adminPasscode;
 const staffHash = hashPasscode(roster.staffPasscode);
 const adminHash = hashPasscode(roster.adminPasscode);
 if (normalizePasscode(roster.staffPasscode).length < 8) die('roster', 'staffPasscode needs at least 8 characters');
