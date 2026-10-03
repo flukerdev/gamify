@@ -24,7 +24,7 @@ export default function LeaderboardTab({ user, game }) {
       const name = (r.firstName || '').trim();
       return `${i + 1}. ${name} — ${pts} pts`;
     });
-    const link = buildInviteLink(game.share_code);
+    const link = buildInviteLink(game);
     const text =
       `${game.title} — Gamify Leaderboard\n\n` +
       `${lines.join('\n')}\n\n` +
@@ -64,13 +64,10 @@ export default function LeaderboardTab({ user, game }) {
     <div className="tab-pad">
       <div className="lb-head">
         <h1 className="tab-title">Leaderboard</h1>
-        {game.protected ? null : (
-          // Passcode games are not joined by link, so there is nothing to share.
-          <div className="lb-head-actions">
-            <button className="btn btn-secondary small" onClick={shareLeaderboard}>Share leaderboard</button>
-            <button className="btn btn-secondary small" onClick={() => setShowInvite(true)}>Invite</button>
-          </div>
-        )}
+        <div className="lb-head-actions">
+          <button className="btn btn-secondary small" onClick={shareLeaderboard}>Share leaderboard</button>
+          <button className="btn btn-secondary small" onClick={() => setShowInvite(true)}>Invite</button>
+        </div>
       </div>
       {shareToast ? <div className="share-toast" role="status">{shareToast}</div> : null}
 
@@ -107,7 +104,7 @@ export default function LeaderboardTab({ user, game }) {
         <div className="modal-wrap" onClick={() => setShowInvite(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3>Invite friends</h3>
+              <h3>Invite</h3>
               <button className="icon-btn" onClick={() => setShowInvite(false)} aria-label="Close">×</button>
             </div>
             <div className="modal-body">

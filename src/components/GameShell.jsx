@@ -23,8 +23,7 @@ const TABS = [
   { id: 'invite',      label: 'Invite Friends' },
 ];
 
-// Photo games lead with the flashcards and have no invite tab (they are
-// entered with a passcode, not a share link).
+// Photo games lead with the flashcards.
 const FACES_TABS = [
   { id: 'flashcards',  label: 'Flashcards' },
   { id: 'learn',       label: 'Learn' },
@@ -32,6 +31,7 @@ const FACES_TABS = [
   { id: 'tests',       label: 'Daily Test' },
   { id: 'leaderboard', label: 'Leaderboard' },
   { id: 'profile',     label: 'My Progress' },
+  { id: 'invite',      label: 'Invite' },
 ];
 
 export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
@@ -266,8 +266,10 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
                                   exitRef={learnExitRef} />}
         {tab==='invite'      && (
           <div className="tab-pad">
-            <h1 className="tab-title">Invite Friends</h1>
-            <p className="hub-sub">Inviting friends is what makes Gamify fun.</p>
+            <h1 className="tab-title">{isFaces ? 'Invite' : 'Invite Friends'}</h1>
+            <p className="hub-sub">{isFaces
+              ? 'Send this link to someone on staff. They tap it, type their name, and they are in.'
+              : 'Inviting friends is what makes Gamify fun.'}</p>
             <InviteFriends game={game} />
           </div>
         )}

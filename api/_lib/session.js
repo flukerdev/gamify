@@ -23,7 +23,8 @@ function secret() {
 }
 
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
-const MAX_SESSION_AGE_MS = 180 * 24 * 60 * 60 * 1000;
+// Long on purpose: people should sign in once per phone and never again.
+const MAX_SESSION_AGE_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 
 export function signSession(payload) {
   const body = b64u(JSON.stringify({ ...payload, iat: Date.now() }));
@@ -44,7 +45,6 @@ export function verifySession(token) {
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
     if (!payload || typeof payload.u !== 'string') return null;
-    // Sessions last half a year; after that the person signs in again.
     if (typeof payload.iat !== 'number' || Date.now() - payload.iat > MAX_SESSION_AGE_MS) return null;
     return payload;
   } catch { return null; }

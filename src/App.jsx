@@ -5,6 +5,7 @@ import {
 import { api } from './api.js';
 import LoginScreen from './components/LoginScreen.jsx';
 import PasscodeLogin from './components/PasscodeLogin.jsx';
+import { syncLinkToUrl, setNoAuto } from './link.js';
 import CompleteProfile from './components/CompleteProfile.jsx';
 import GameHub from './components/GameHub.jsx';
 import GameShell from './components/GameShell.jsx';
@@ -60,6 +61,13 @@ export default function App() {
     // run once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keep this person's link in the address bar while they are signed in, so
+  // "Add to Home Screen" at any moment captures an address that signs them in.
+  useEffect(() => { if (user) syncLinkToUrl(); }, [user]);
+
+  // "Log out" is deliberate: do not sign straight back in from the address.
+  function explicitLogout() { setNoAuto(); logout(); }
 
   // If a logged-in returning user lands on an invite link, use their stored
   // session to join the game instead of forcing them through the phone form.
@@ -131,18 +139,19 @@ export default function App() {
       }} />
     );
   }
-  if (!user.first_name || !user.last_name) {
+  // People who signed in by name (login_key) may have given one name only.
+  if (!user.first_name || (!user.last_name && !user.login_key)) {
     return <CompleteProfile user={user} onDone={(u) => setCurrentUser(u)} />;
   }
   if (!gameId) {
-    return <GameHub user={user} onPick={(id) => setCurrentGameId(id)} onLogout={logout} />;
+    return <GameHub user={user} onPick={(id) => setCurrentGameId(id)} onLogout={explicitLogout} />;
   }
   return (
     <GameShell
       user={user}
       gameId={gameId}
       onSwitchGame={() => setCurrentGameId(null)}
-      onLogout={logout}
+      onLogout={explicitLogout}
     />
   );
 }

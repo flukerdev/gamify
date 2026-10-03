@@ -46,7 +46,7 @@ export default function InstallTip() {
               <li><b>Android:</b> open in Chrome, tap ⋮, then Add to Home screen.</li>
             </>
           )}
-          <li>Open it from the new icon and sign in there.</li>
+          <li>From now on, open it from the new icon.</li>
         </ol>
       ) : null}
     </div>

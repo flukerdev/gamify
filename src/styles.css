@@ -1094,6 +1094,7 @@ body[data-tour-spotlight="rank"] .lb-row.me {
 .crop-actions { display: flex; justify-content: space-between; gap: 8px; width: 100%; max-width: 340px; margin-top: 14px; }
 
 /* ---------- install tip ---------- */
+.admin-link-card { margin-top: 12px; }
 .install-tip { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-2); }
 .install-tip-toggle {
   appearance: none; border: 0; background: transparent; cursor: pointer; font-family: inherit;

@@ -1,6 +1,7 @@
 // Gamify API — single Express app exported as a Vercel serverless function.
 // Local dev: imported by server-local.js and bound to a port.
 
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import { OAuth2Client } from 'google-auth-library';
@@ -59,8 +60,8 @@ function publicGame(game) {
     staff_code_hash, admin_code_hash, code_version,
     last_notified_ranks, last_passed_notified, ...rest
   } = game;
-  // A protected game is never joined by share code, so nobody needs to see it.
-  if (staff_code_hash) delete rest.share_code;
+  // For a protected game share_code holds the join code that goes in the
+  // invite link (/?k=<code>). Members can see it so they can invite others.
   return { ...rest, protected: !!staff_code_hash };
 }
 const isProtected = (game) => !!game?.staff_code_hash;
@@ -467,10 +468,9 @@ app.post('/api/auth/passcode', async (req, res) => {
     const passcode  = normalizePasscode(req.body?.passcode);
     const firstName = cleanName(req.body?.firstName);
     const lastName  = cleanName(req.body?.lastName);
-    if (!passcode)  return res.status(400).json({ error: 'Enter the passcode.' });
-    if (!firstName || !lastName) {
-      return res.status(400).json({ error: 'Enter your first and last name.' });
-    }
+    if (!passcode)  return res.status(400).json({ error: 'Open the link you were sent to get in.' });
+    // Only a first name is required; a last name just tells two Sams apart.
+    if (!firstName) return res.status(400).json({ error: 'Enter your name.' });
 
     const ip = clientIp(req);
     const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
@@ -494,7 +494,7 @@ app.post('/api/auth/passcode', async (req, res) => {
       // Keep the table small: old failures no longer count toward anything.
       await supabase.from('login_attempts').delete()
         .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-      return res.status(401).json({ error: 'That passcode is not right. Check it and try again.' });
+      return res.status(401).json({ error: 'That link is no longer valid. Ask for the new one.' });
     }
     const asAdmin = game.admin_code_hash === hash;
 
@@ -1360,9 +1360,17 @@ app.put('/api/games/:id/pairs', async (req, res) => {
 
 const FACE_TERM = '(photo)';
 const REMOVED_NAME = '(removed)';
-// The staff passcode is the only thing between the internet and the photos.
-const MIN_STAFF_PASSCODE = 8;
-const MIN_ADMIN_PASSCODE = 10;
+// Link codes: lowercase letters and digits only (so they survive any chat
+// app or keyboard), no look-alike characters, and always containing a letter
+// (the classic join-by-code route upper-cases what is typed, so a lowercase
+// code can never be matched there).
+const LINK_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+function newLinkCode(prefix, n) {
+  const bytes = crypto.randomBytes(n);
+  let out = prefix;
+  for (let i = 0; i < n; i++) out += LINK_ALPHABET[bytes[i] % LINK_ALPHABET.length];
+  return out;
+}
 const MAX_PHOTO_BYTES = 300 * 1024;
 
 // Accepts a JPEG data URL (what the in-app cropper produces) and returns bare
@@ -1512,49 +1520,33 @@ app.delete('/api/games/:id/students/:pairId', async (req, res) => {
   } catch (e) { sendError(res, e); }
 });
 
-// PUT /api/games/:id/passcodes  body: { staffPasscode?, adminPasscode? }  [admin]
-// Changing either passcode signs every device out (code_version bump); the
-// admin making the change gets a fresh token back so they stay signed in.
-app.put('/api/games/:id/passcodes', async (req, res) => {
+// POST /api/games/:id/links/reset  [admin]
+// A protected game is entered by link: /?k=<code>. The staff code lives in
+// games.share_code (so the app can show the invite link to members); the
+// admin code is only ever stored hashed, so it is returned here exactly once.
+// Resetting makes new codes and signs every device out (code_version bump);
+// the admin doing it gets a fresh token back and stays signed in.
+app.post('/api/games/:id/links/reset', async (req, res) => {
   try {
     const user = await requireUser(req);
     const game = req.game;
     if (!req.isAdmin || !isProtected(game)) {
-      return res.status(403).json({ error: 'Only the admin can change passcodes.' });
+      return res.status(403).json({ error: 'Only the admin can reset the links.' });
     }
-    const staff = normalizePasscode(req.body?.staffPasscode);
-    const admin = normalizePasscode(req.body?.adminPasscode);
-    if (!staff && !admin) return res.status(400).json({ error: 'Enter a new passcode.' });
-    if (staff && staff.length < MIN_STAFF_PASSCODE) {
-      return res.status(400).json({ error: `The staff passcode needs at least ${MIN_STAFF_PASSCODE} characters.` });
-    }
-    if (admin && admin.length < MIN_ADMIN_PASSCODE) {
-      return res.status(400).json({ error: `The admin passcode needs at least ${MIN_ADMIN_PASSCODE} characters.` });
-    }
-
-    const staffHash = staff ? hashPasscode(staff) : game.staff_code_hash;
-    const adminHash = admin ? hashPasscode(admin) : game.admin_code_hash;
-    if (staffHash === adminHash) {
-      return res.status(400).json({ error: 'The staff and admin passcodes must be different.' });
-    }
-    // A passcode identifies its game, so it cannot collide with another game's.
-    const { data: clash, error: cErr } = await supabase.from('games').select('id')
-      .neq('id', game.id)
-      .or(`staff_code_hash.in.(${staffHash},${adminHash}),admin_code_hash.in.(${staffHash},${adminHash})`)
-      .limit(1);
-    if (cErr) throw cErr;
-    if (clash?.length) return res.status(400).json({ error: 'That passcode is already in use. Pick a different one.' });
-
+    const staffCode = newLinkCode('names', 8);
+    const adminCode = newLinkCode('admin', 12);
     const [updated] = await expectWrite(
-      `change passcodes for game ${game.id}`,
+      `reset links for game ${game.id}`,
       1,
       supabase.from('games').update({
-        staff_code_hash: staffHash, admin_code_hash: adminHash,
+        share_code: staffCode,
+        staff_code_hash: hashPasscode(staffCode),
+        admin_code_hash: hashPasscode(adminCode),
         code_version: (game.code_version || 1) + 1,
       }).eq('id', game.id).select('*'),
     );
     const token = signSession({ u: user.id, g: updated.id, cv: updated.code_version, a: 1 });
-    res.json({ ok: true, token });
+    res.json({ ok: true, token, game: publicGame(updated), adminCode });
   } catch (e) { sendError(res, e); }
 });
 

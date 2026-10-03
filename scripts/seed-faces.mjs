@@ -19,7 +19,6 @@ dotenv.config({ path: '.env.local', override: true });
 
 const { supabase, assertEnv } = await import('../api/_lib/supabase.js');
 const { hashPasscode, normalizePasscode } = await import('../api/_lib/session.js');
-import crypto from 'node:crypto';
 
 const dir = process.argv[2];
 if (!dir) { console.error('usage: node scripts/seed-faces.mjs <dir>'); process.exit(1); }
@@ -49,11 +48,10 @@ if (!game) {
     .select('*').single();
   if (oErr) die('create owner', oErr);
   const { data: created, error: cErr } = await supabase.from('games').insert({
-    // share_code is required and unique, but a protected game is never joined
-    // by it. A long lowercase value can never equal a typed code (those are
-    // upper-cased before lookup) and cannot be guessed.
+    // share_code holds the staff link code (normalized), so the app can show
+    // members the invite link: /?k=<share_code>.
     title: roster.title, admin_user_id: owner.id,
-    share_code: `protected-${crypto.randomBytes(24).toString('hex')}`,
+    share_code: normalizePasscode(roster.staffPasscode),
     direction: 'term', kind: 'faces',
     staff_code_hash: staffHash, admin_code_hash: adminHash,
   }).select('*').single();
