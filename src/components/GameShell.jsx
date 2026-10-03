@@ -9,6 +9,9 @@ import LearnTab from './LearnTab.jsx';
 import EditPairs from './EditPairs.jsx';
 import InviteFriends from './InviteFriends.jsx';
 import OnboardingTour from './OnboardingTour.jsx';
+import FlashcardsTab from './FlashcardsTab.jsx';
+import ManageStudents from './ManageStudents.jsx';
+import { setPhotoVersions, preloadPhotos } from '../photos.js';
 import Loading from './Loading.jsx';
 
 const TABS = [
@@ -18,6 +21,17 @@ const TABS = [
   { id: 'tests',       label: 'Tests' },
   { id: 'learn',       label: 'Learn' },
   { id: 'invite',      label: 'Invite Friends' },
+];
+
+// Photo games lead with the flashcards and have no invite tab (they are
+// entered with a passcode, not a share link).
+const FACES_TABS = [
+  { id: 'flashcards',  label: 'Flashcards' },
+  { id: 'learn',       label: 'Learn' },
+  { id: 'quizzes',     label: 'Daily Quiz' },
+  { id: 'tests',       label: 'Daily Test' },
+  { id: 'leaderboard', label: 'Leaderboard' },
+  { id: 'profile',     label: 'My Progress' },
 ];
 
 export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
@@ -32,7 +46,11 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
 
   // First-run tour: shown until users.onboarded_at is set. Spotlight names the
   // target group: 'rank' (leaderboard row) or 'activities' (Quiz/Test/Learn tabs).
-  const tourActive = !user.onboarded_at;
+  const isFaces = game?.kind === 'faces';
+  const tabs = isFaces ? FACES_TABS : TABS;
+  // The tour points at leaderboard rows and the invite flow; photo games open
+  // on the flashcards instead and need no tour.
+  const tourActive = !!game && !isFaces && !user.onboarded_at;
   const [tourSpotlight, setTourSpotlight] = useState(null);
   // Mirror tourSpotlight to a body data attribute so CSS can react to it from
   // anywhere — the leaderboard row spotlight reads it without prop drilling.
@@ -69,10 +87,20 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
     setErr('');
     try {
       const { game, pairs, isAdmin } = await api.get(`/api/games/${gameId}`);
+      if (game.kind === 'faces') {
+        // Versions must be in place before any photo renders.
+        setPhotoVersions(pairs || []);
+        preloadPhotos(game.id, pairs || []);
+        if (!landedRef.current) { landedRef.current = true; setTab('flashcards'); }
+      }
       setGame(game); setPairs(pairs || []); setIsAdmin(isAdmin);
-    } catch (e) { setErr(e.message); }
+    } catch (e) {
+      // A dead session signs the person out (api.js); nothing to show here.
+      if (e.status !== 401) setErr(e.message);
+    }
   }
-  useEffect(() => { loadGame(); }, [gameId]);
+  const landedRef = useRef(false);
+  useEffect(() => { landedRef.current = false; loadGame(); }, [gameId]);
 
   // The "X" inside LearnTab opens the same prompt. We expose openPrompt via
   // the same exitRef LearnTab fills. The X has no chosen destination, so
@@ -148,22 +176,35 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
   return (
     <div className="shell">
       <button className="nav-toggle" onClick={() => setNavOpen(!navOpen)} aria-label="Menu">≡</button>
+      {navOpen && !tourActive ? (
+        <div className="nav-backdrop" onClick={() => setNavOpen(false)} aria-hidden="true" />
+      ) : null}
 
       <aside className={`sidebar ${navOpen ? 'open' : ''} ${tourActive ? 'tour-active' : ''}`}>
         <div className="sidebar-top">
-          <button className="game-switcher"
-            onClick={() => tryNavigateTo({ kind: 'switch' })}
-            title="Switch game">
-            <Monogram name={game.title} size={40} />
-            <div className="switcher-text">
-              <div className="switcher-title">{game.title}</div>
-              <div className="switcher-sub">Switch ↗</div>
+          {game.protected ? (
+            // A passcode session belongs to this one game; nothing to switch to.
+            <div className="game-switcher static">
+              <Monogram name={game.title} size={40} />
+              <div className="switcher-text">
+                <div className="switcher-title">{game.title}</div>
+              </div>
             </div>
-          </button>
+          ) : (
+            <button className="game-switcher"
+              onClick={() => tryNavigateTo({ kind: 'switch' })}
+              title="Switch game">
+              <Monogram name={game.title} size={40} />
+              <div className="switcher-text">
+                <div className="switcher-title">{game.title}</div>
+                <div className="switcher-sub">Switch ↗</div>
+              </div>
+            </button>
+          )}
         </div>
 
         <nav className="nav-tabs">
-          {TABS.map(t => {
+          {tabs.map(t => {
             const spotlight =
               tourSpotlight === 'activities' && ['quizzes', 'tests', 'learn'].includes(t.id);
             return (
@@ -178,24 +219,29 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
 
         <div className="sidebar-bottom">
           {isAdmin ? (
-            <button className="btn btn-secondary small edit-pairs-btn" onClick={() => setShowEditPairs(true)}>Edit Pairs</button>
+            <button className="btn btn-secondary small edit-pairs-btn"
+              onClick={() => { setNavOpen(false); setShowEditPairs(true); }}>
+              {isFaces ? 'Manage students' : 'Edit Pairs'}
+            </button>
           ) : null}
           <div className="me-row">
             <div className="me-name">{user.first_name} {user.last_name}</div>
             <button className="btn btn-ghost small" onClick={() => tryNavigateTo({ kind: 'logout' })}>Log out</button>
           </div>
-          <div className="share-row">Code: <b>{game.share_code}</b></div>
+          {game.protected ? null : <div className="share-row">Code: <b>{game.share_code}</b></div>}
         </div>
       </aside>
 
       <main className="content">
+        {tab==='flashcards'  && <FlashcardsTab game={game} pairs={pairs}
+                                  onGoLearn={() => setTab('learn')} />}
         {tab==='profile'     && <ProfileTab user={user} game={game} />}
         {tab==='leaderboard' && <LeaderboardTab user={user} game={game} />}
         {tab==='quizzes'     && <QuizzesTab user={user} game={game} pairs={pairs} onGoToLeaderboard={() => setTab('leaderboard')} />}
         {tab==='tests'       && <TestsTab    user={user} game={game} pairs={pairs} onGoToLeaderboard={() => setTab('leaderboard')} />}
         {tab==='learn'       && <LearnTab
                                   user={user} game={game}
-                                  onExit={() => setTab('profile')}
+                                  onExit={() => setTab('leaderboard')}
                                   onActiveChange={setLearnActive}
                                   onProgressChange={setLearnProgress}
                                   exitRef={learnExitRef} />}
@@ -215,7 +261,11 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
         <ExitPointsModal points={exitPoints} onClose={finishExitNav} />
       )}
 
-      {showEditPairs && <EditPairs gameId={gameId} onClose={() => { setShowEditPairs(false); loadGame(); }} />}
+      {showEditPairs && (isFaces
+        ? <ManageStudents game={game} pairs={pairs} user={user}
+            onChanged={loadGame}
+            onClose={() => { setShowEditPairs(false); loadGame(); }} />
+        : <EditPairs gameId={gameId} onClose={() => { setShowEditPairs(false); loadGame(); }} />)}
 
       {tourActive && (
         <OnboardingTour

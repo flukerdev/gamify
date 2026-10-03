@@ -2,10 +2,22 @@
 
 A competitive learning platform. An admin creates a "game" with term/definition pairs; participants join via a 6-character share code and compete on a live leaderboard by earning points through a Quizlet-style **Learn** mode, daily **Quizzes**, and daily **Tests**. First use case: memorizing Bible verses with family and friends.
 
+**This deployment is branded "STS - Know your Names!"** It hosts a *photo game*: each card is a student's photo (front) and name (back), so ministry staff can learn every student's name. See [Photo games](#photo-games-sts---know-your-names) below.
+
 - **Frontend:** React + Vite
 - **Backend:** Express, deployed as a Vercel serverless function
-- **Database:** Supabase (Postgres) — used for data only; no Supabase Auth
-- **Auth:** phone number only (no password, no SMS verification for MVP)
+- **Database:** Supabase (Postgres) — used for data only; no Supabase Auth. RLS is ENABLED on every table with no policies, so only the service-role key (the API) can read or write.
+- **Auth:** signed session tokens. Photo games sign in with a shared passcode + your name; classic games keep phone-number sign-in at `/?legacy=1`.
+
+## Photo games (STS - Know your Names!)
+
+- `games.kind = 'faces'`. The name is `pairs.definition`; `pairs.term` is the placeholder `(photo)`; direction is always `term` (show the photo, recall the name), so Learn / Quiz / Test run unchanged.
+- **Photos are private.** Each is a 512px JPEG stored base64 in `pair_photos` and served only by `GET /api/games/:id/photos/:pairId` to signed-in members. They are never in the repo (which is public) and never in public storage.
+- **Passcodes.** A game with `staff_code_hash` set is *protected*: it cannot be joined by share code or invite link. Staff enter the shared staff passcode + first and last name (`POST /api/auth/passcode`). The name is the identity (same name on a new phone = same person). The **admin passcode**, not a user id, grants admin rights. Changing a passcode bumps `code_version` and signs every device out. Failed guesses are throttled per IP.
+- **Tabs:** Flashcards (tap to flip, unscored), Learn, Daily Quiz, Daily Test, Leaderboard, My Progress.
+- **Manage** (admin passcode only, in the menu): add a student (choose photo, drag / pinch / slider to crop, type the name), edit or re-crop, remove (deletes the photo for good), remove a person from the leaderboard, change passcodes.
+- **Seeding:** `node scripts/seed-faces.mjs <dir>` creates the game and loads a folder of face crops (see the header of that file). Keep the folder outside the repo.
+- **Install:** the app ships a web manifest and PNG touch icon; staff add it to their home screen from Safari (Share, Add to Home Screen) or Chrome (menu, Add to Home screen).
 
 ---
 
@@ -26,20 +38,7 @@ A competitive learning platform. An admin creates a "game" with term/definition 
    - Paste the contents of `schema.sql` and run.
    - Paste the contents of `seed.sql` and run (creates a sample Bible-verse game with share code `BIBLE1`).
    - **Upgrading an existing DB from an older schema?** Just re-run `schema.sql`. It's idempotent — every `CREATE TABLE` uses `IF NOT EXISTS`, missing columns are added via `ALTER TABLE … ADD COLUMN IF NOT EXISTS`, and the `users.phone` unique constraint is backfilled by a guarded `DO` block. Drift is what caused the "cards disappear after creating a game" class of bug; see Troubleshooting §6.
-   - **Disable RLS on every table.** The API uses the service-role key (which bypasses RLS), and no client ever talks to Supabase directly. Leaving RLS enabled with no policies will silently drop writes from any other key:
-     ```sql
-     ALTER TABLE users                DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE games                DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE pairs                DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE memberships          DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE points_ledger        DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE quiz_attempts        DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE test_attempts        DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE learn_runs           DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE daily_question_sets  DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE daily_rank_snapshots DISABLE ROW LEVEL SECURITY;
-     ALTER TABLE activity_log         DISABLE ROW LEVEL SECURITY;
-     ```
+   - **RLS stays ENABLED on every table** (`schema.sql` turns it on, with no policies). The API uses the service-role key, which bypasses RLS, and no client ever talks to Supabase directly, so the public anon key can read nothing. If writes fail with a row-count error, `SUPABASE_SERVICE_ROLE_KEY` is the anon key by mistake.
 
 3. **Configure env vars**
    ```bash
@@ -94,7 +93,7 @@ src/
   config.js          SINGLE SOURCE OF TRUTH for tunable constants. Edit here.
   main.jsx           React entry.
   App.jsx            Routes between login → profile completion → hub → game shell.
-  api.js             Tiny fetch wrapper. Sends X-User-Id header.
+  api.js             Tiny fetch wrapper. Sends the signed session token (X-Session).
   auth.js            localStorage-backed session.
   utils/
     phone.js         normalize / validate / format
@@ -120,11 +119,12 @@ server-local.js      Local-only port binding for the Express app.
 
 ## 4. How the major features work
 
-### Auth (intentionally minimal for MVP)
-- Login is by phone number only. Numbers are normalized (`(404) 555-1234`, `404-555-1234`, `+1 404 555 1234`, and `4045551234` all collapse to `4045551234`).
+### Auth
+- Every API call carries a signed session token (`X-Session`, see `api/_lib/session.js`); a bare user id is never trusted. All `/api/games/:id/*` routes pass one guard that checks membership and, for protected games, that the session was issued for that game under its current passcodes.
+- Classic games: login is by phone number only (reachable at `/?legacy=1`). Numbers are normalized (`(404) 555-1234`, `404-555-1234`, `+1 404 555 1234`, and `4045551234` all collapse to `4045551234`).
 - If the normalized phone exists, the user logs in **and their saved name comes back with them** — they don't re-enter it. Otherwise a new row is created, and the user is asked for first/last name.
 - The DB enforces `unique(phone)` so a single phone always resolves to a single user. As a belt-and-suspenders measure for any DB that's missing the constraint, `POST /api/auth/login` picks the canonical row (prefers one with a complete profile, then the oldest) and merges any duplicates' memberships / points / activity into it before deleting them — see `mergeUserInto` in `api/_app.js`.
-- The session is persisted in `localStorage`. Each API call sends `X-User-Id`. To swap in real SMS verification later, replace `POST /api/auth/login`.
+- The session (user + token) is persisted in `localStorage`. To swap in real SMS verification later, replace `POST /api/auth/login`.
 
 ### Daily Quizzes & Tests
 - 5-question quiz; 20-question test. One attempt per user per day per game (locked once taken).

@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
-import { similarity, isExactMatch } from '../utils/similarity.js';
+import { similarity, isExactMatch, normalizeForCompare } from '../utils/similarity.js';
 import {
   CARDS_PER_SESSION, SIMILARITY_THRESHOLD,
   RECENT_SESSIONS_CHART_COUNT, LEARN_RUN_POINTS,
 } from '../config.js';
 import SessionChart from './SessionChart.jsx';
 import Loading from './Loading.jsx';
+import FacePhoto from './FacePhoto.jsx';
 
 // Phases of the local UI state machine:
 //  - 'answering' : user is on a card (MC: picking; TIO: typing)
@@ -104,14 +105,23 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
     return Array.from({ length: CARDS_PER_SESSION }, (_, i) => i < answered ? 'done' : 'idle');
   }
 
-  if (err) return <div className="form-error">{err}</div>;
+  const isFaces = game.kind === 'faces';
+
+  if (err) return (
+    <div className="tab-pad">
+      <div className="form-error">{err}</div>
+      <button className="btn btn-secondary" onClick={() => { setErr(''); load(); }}>Try again</button>
+    </div>
+  );
   if (phase === 'empty') {
     return (
       <div className="tab-pad">
         <h1 className="tab-title">Learn</h1>
         <div className="empty-card">
           <h3>Nothing to learn yet</h3>
-          <p>The admin needs to add at least one term and definition to this game.</p>
+          <p>{isFaces
+            ? 'Once students are added, you can learn their names here.'
+            : 'The admin needs to add at least one term and definition to this game.'}</p>
         </div>
       </div>
     );
@@ -166,7 +176,10 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
     e?.preventDefault();
     if (phase !== 'answering' || !nextCard) return;
     const userAnswer = tioInput;
-    const exact = isExactMatch(userAnswer, nextCard.correctAnswer);
+    // A name typed in a different case ("shep") is still exactly right.
+    const exact = isFaces
+      ? normalizeForCompare(userAnswer) === normalizeForCompare(nextCard.correctAnswer)
+      : isExactMatch(userAnswer, nextCard.correctAnswer);
     // Exact match -> auto-advance immediately. Brief green flash via the
     // 'graded' phase so the user sees confirmation, then we commit.
     if (exact) {
@@ -249,6 +262,8 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
         ) : nextCard ? (
           <CardView
             animKey={animKey}
+            gameId={game.id}
+            isFaces={isFaces}
             card={nextCard}
             graded={graded}
             tioInput={tioInput}
@@ -272,12 +287,17 @@ function ProgressBar({ segs }) {
   );
 }
 
-function CardView({ animKey, card, graded, tioInput, onPickMc, onChangeTio, onSubmitTio, onOverride, onContinue }) {
+function CardView({ animKey, gameId, isFaces, card, graded, tioInput, onPickMc, onChangeTio, onSubmitTio, onOverride, onContinue }) {
+  // Photo games show the student's photo where a text game shows the prompt.
+  const prompt = isFaces
+    ? <FacePhoto gameId={gameId} pairId={card.pairId} className="card-photo" />
+    : <div className="card-prompt">{card.prompt}</div>;
+
   if (card.kind === 'mc') {
     return (
       <div className="card-stage" key={animKey}>
-        <div className="card-kind-pill">Multiple choice</div>
-        <div className="card-prompt">{card.prompt}</div>
+        <div className="card-kind-pill">{isFaces ? 'Who is this?' : 'Multiple choice'}</div>
+        {prompt}
         <div className="mc-options">
           {card.options.map((opt, i) => {
             let cls = 'mc-opt';
@@ -306,18 +326,31 @@ function CardView({ animKey, card, graded, tioInput, onPickMc, onChangeTio, onSu
   // type-it-out
   return (
     <div className="card-stage" key={animKey}>
-      <div className="card-kind-pill">Type it out</div>
-      <div className="card-prompt">{card.prompt}</div>
+      <div className="card-kind-pill">{isFaces ? 'Type the name' : 'Type it out'}</div>
+      {prompt}
 
       {!graded ? (
         <form onSubmit={onSubmitTio} className="tio-form">
-          <textarea
-            className="text-input area tio-input"
-            value={tioInput}
-            onChange={(e)=>onChangeTio(e.target.value)}
-            autoFocus
-            placeholder="Type your answer…"
-          />
+          {isFaces ? (
+            // Single line so the keyboard's Go key checks the answer.
+            <input
+              className="text-input"
+              value={tioInput}
+              onChange={(e)=>onChangeTio(e.target.value)}
+              autoFocus
+              autoCapitalize="words" autoCorrect="off" autoComplete="off" spellCheck={false}
+              enterKeyHint="go"
+              placeholder="Type their name…"
+            />
+          ) : (
+            <textarea
+              className="text-input area tio-input"
+              value={tioInput}
+              onChange={(e)=>onChangeTio(e.target.value)}
+              autoFocus
+              placeholder="Type your answer…"
+            />
+          )}
           <button className="btn btn-primary" type="submit" disabled={!tioInput.trim()}>Check</button>
         </form>
       ) : (

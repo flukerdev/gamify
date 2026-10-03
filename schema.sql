@@ -257,3 +257,83 @@ create table if not exists email_otp_codes (
   primary key (email)
 );
 create index if not exists idx_email_otp_expires on email_otp_codes(expires_at);
+
+-- ============================================================================
+-- Photo games ("faces") + passcode-protected games.
+-- Added for "STS - Know your Names!": a game whose cards are a student's photo
+-- (front) and name (back). All additions are additive and idempotent.
+-- ============================================================================
+
+-- kind: 'standard' (term/definition text) or 'faces' (photo -> name).
+alter table games add column if not exists kind text not null default 'standard';
+alter table games drop constraint if exists games_kind_check;
+alter table games add constraint games_kind_check check (kind in ('standard', 'faces'));
+
+-- Passcode protection. When staff_code_hash is set the game is "protected":
+--   - it cannot be joined by share code or invite link
+--   - people sign in with the shared staff passcode + their name
+--   - the admin passcode (not a user id) is what grants admin rights
+-- Hashes are sha256('gamify-passcode:' || normalized passcode), hex. They are
+-- never sent to the client. Bumping code_version signs everyone out.
+alter table games add column if not exists staff_code_hash text;
+alter table games add column if not exists admin_code_hash text;
+alter table games add column if not exists code_version int not null default 1;
+create unique index if not exists idx_games_staff_code on games(staff_code_hash) where staff_code_hash is not null;
+create unique index if not exists idx_games_admin_code on games(admin_code_hash) where admin_code_hash is not null;
+
+-- Name-based identity for passcode sign-in: '<game id>:<first>|<last>', lowercased.
+alter table users add column if not exists login_key text;
+create unique index if not exists idx_users_login_key on users(login_key) where login_key is not null;
+
+-- photo_version: null = no photo. Bumped on every photo change so clients can
+-- cache photos forever by (pair, version).
+alter table pairs add column if not exists photo_version int;
+
+-- One square JPEG per card, base64. Lives in the database (not public storage)
+-- so it is only ever served through the API to signed-in members of the game.
+create table if not exists pair_photos (
+  pair_id     uuid primary key references pairs(id) on delete cascade,
+  game_id     uuid not null references games(id) on delete cascade,
+  data        text not null,
+  updated_at  timestamptz not null default now()
+);
+create index if not exists idx_pair_photos_game on pair_photos(game_id);
+
+-- Failed passcode attempts, for throttling guesses.
+create table if not exists login_attempts (
+  id          bigserial primary key,
+  ip          text not null,
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_login_attempts_ip on login_attempts(ip, created_at);
+
+-- Lock every table down to the service role. The API is the only client and it
+-- uses the service-role key (which bypasses RLS), so enabling RLS with no
+-- policies means the public anon key can read and write nothing. This matters
+-- now that the database holds photos of minors.
+-- IMPORTANT: SUPABASE_SERVICE_ROLE_KEY must really be the service-role key.
+alter table users                enable row level security;
+alter table games                enable row level security;
+alter table pairs                enable row level security;
+alter table memberships          enable row level security;
+alter table points_ledger        enable row level security;
+alter table quiz_attempts        enable row level security;
+alter table test_attempts        enable row level security;
+alter table learn_runs           enable row level security;
+alter table daily_question_sets  enable row level security;
+alter table daily_rank_snapshots enable row level security;
+alter table activity_log         enable row level security;
+alter table email_otp_codes      enable row level security;
+alter table pair_photos          enable row level security;
+alter table login_attempts       enable row level security;
+-- Views run as their owner and would bypass RLS, so take the totals view away
+-- from the public roles explicitly.
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    revoke all on v_user_game_totals from anon;
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'authenticated') then
+    revoke all on v_user_game_totals from authenticated;
+  end if;
+end $$;

@@ -4,6 +4,7 @@ import {
 } from './auth.js';
 import { api } from './api.js';
 import LoginScreen from './components/LoginScreen.jsx';
+import PasscodeLogin from './components/PasscodeLogin.jsx';
 import CompleteProfile from './components/CompleteProfile.jsx';
 import GameHub from './components/GameHub.jsx';
 import GameShell from './components/GameShell.jsx';
@@ -16,6 +17,14 @@ function readInviteCodeFromUrl() {
     const code = (u.searchParams.get('invite') || '').trim().toUpperCase();
     return code || null;
   } catch { return null; }
+}
+
+// The original phone-number sign-in for classic Gamify games stays reachable
+// at /?legacy=1. The front door is the passcode sign-in.
+function wantsLegacyLogin() {
+  if (typeof window === 'undefined') return false;
+  try { return new URL(window.location.href).searchParams.get('legacy') === '1'; }
+  catch { return false; }
 }
 
 function clearInviteFromUrl() {
@@ -46,7 +55,7 @@ export default function App() {
     api.get('/api/auth/me').then(({ user: fresh }) => {
       if (cancelled || !fresh) return;
       setCurrentUser(fresh);
-    }).catch(() => { /* stale token / network — leave cached user as-is */ });
+    }).catch(() => { /* network: keep the cached user. A dead session (401) signs out in api.js. */ });
     return () => { cancelled = true; };
     // run once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -112,7 +121,15 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginScreen onSignedIn={(u) => { setCurrentUser(u); }} />;
+    if (wantsLegacyLogin()) {
+      return <LoginScreen onSignedIn={(u) => { setCurrentUser(u); }} />;
+    }
+    return (
+      <PasscodeLogin onSignedIn={(u, game) => {
+        setCurrentGameId(game.id);
+        setCurrentUser(u);
+      }} />
+    );
   }
   if (!user.first_name || !user.last_name) {
     return <CompleteProfile user={user} onDone={(u) => setCurrentUser(u)} />;

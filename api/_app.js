@@ -8,6 +8,7 @@ import { supabase, assertEnv } from './_lib/supabase.js';
 import { normalizePhone, easternDateString, easternWeekRange, genShareCode, seededRng, shuffleWith, sendError, expectWrite, expectRead } from './_lib/util.js';
 import { verifyAppleIdentityToken } from './_lib/appleAuth.js';
 import { sendPush } from './_lib/apns.js';
+import { signSession, verifySession, hashPasscode, normalizePasscode, cleanName, loginKey } from './_lib/session.js';
 import {
   QUIZ_LENGTH, QUIZ_MAX_POINTS, TEST_LENGTH, TEST_MAX_POINTS,
   LEARN_RUN_POINTS, CARDS_PER_SESSION, MC_OPTION_COUNT,
@@ -19,22 +20,82 @@ const googleAuthClient = new OAuth2Client();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '256kb' }));
+// 1mb so a cropped card photo (a ~60KB JPEG, base64) fits comfortably.
+app.use(express.json({ limit: '1mb' }));
 
 // ---------------------------------------------------------------------------
-// "Auth": the client sends the current user's id as a header. Per spec, MVP
-// has no password / no SMS verification. We still verify the user exists.
+// Auth: every call carries a signed session token in `X-Session` (see
+// _lib/session.js). A bare user id is never trusted. The verified payload is
+// kept on req.session; the user row is cached on the request so the game
+// guard below and the route handler share one lookup.
 // ---------------------------------------------------------------------------
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function authError(message = 'Please sign in again.') {
+  const e = new Error(message); e.status = 401; return e;
+}
+
 async function requireUser(req) {
-  const userId = req.header('x-user-id');
-  if (!userId) {
-    const e = new Error('Not authenticated'); e.status = 401; throw e;
-  }
-  const { data, error } = await supabase.from('users').select('*').eq('id', userId).maybeSingle();
+  if (req._user) return req._user;
+  const session = verifySession(req.header('x-session'));
+  if (!session || !UUID_RE.test(session.u)) throw authError();
+  const { data, error } = await supabase.from('users').select('*').eq('id', session.u).maybeSingle();
   if (error) throw error;
-  if (!data) { const e = new Error('User not found'); e.status = 401; throw e; }
+  if (!data) throw authError();
+  req.session = session;
+  req._user = data;
   return data;
 }
+
+// Session token for a plain (non-passcode) sign-in.
+function tokenFor(user) { return signSession({ u: user.id }); }
+
+// Never send passcode hashes (or cron bookkeeping) to a client: a member who
+// could read the admin hash could guess the admin passcode offline.
+function publicGame(game) {
+  if (!game) return game;
+  const {
+    staff_code_hash, admin_code_hash, code_version,
+    last_notified_ranks, last_passed_notified, ...rest
+  } = game;
+  return { ...rest, protected: !!staff_code_hash };
+}
+const isProtected = (game) => !!game?.staff_code_hash;
+
+// Guard for every /api/games/:id/* route. Loads the game once, checks the
+// caller is a member, and for passcode-protected games checks that the
+// session was issued for THIS game under the CURRENT passcodes. Sets:
+//   req.game     the full game row (server-side only)
+//   req.isAdmin  admin rights for this request
+// Admin rights on a protected game come from having signed in with the admin
+// passcode, never from a user id — names are not secret, the passcode is.
+app.use('/api/games/:id', async (req, res, next) => {
+  const { id } = req.params;
+  if (id === 'join') return next();
+  try {
+    if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Game not found.' });
+    const user = await requireUser(req);
+    const { data: game, error: gErr } = await supabase
+      .from('games').select('*').eq('id', id).maybeSingle();
+    if (gErr) throw gErr;
+    if (!game) return res.status(404).json({ error: 'Game not found.' });
+
+    const { data: mem, error: mErr } = await supabase.from('memberships')
+      .select('user_id').eq('user_id', user.id).eq('game_id', id).maybeSingle();
+    if (mErr) throw mErr;
+
+    if (isProtected(game)) {
+      const s = req.session || {};
+      if (!mem || s.g !== game.id || s.cv !== game.code_version) throw authError();
+      req.isAdmin = s.a === 1;
+    } else {
+      if (!mem) return res.status(403).json({ error: 'You are not in this game.' });
+      req.isAdmin = game.admin_user_id === user.id;
+    }
+    req.game = game;
+    next();
+  } catch (e) { sendError(res, e); }
+});
 
 // ===========================================================================
 // AUTH
@@ -283,7 +344,7 @@ app.post('/api/auth/login', async (req, res) => {
     console.log('[gamify api] login: phone', phone,
       isNew ? '-> NEW user' : '-> existing user', user.id,
       user.first_name ? '(profile complete)' : '(no name yet)');
-    res.json({ user, isNew });
+    res.json({ user, isNew, token: tokenFor(user) });
   } catch (e) { sendError(res, e); }
 });
 
@@ -330,7 +391,8 @@ app.post('/api/auth/invite-join', async (req, res) => {
     if (!phone || phone.length < 7) return res.status(400).json({ error: 'Please enter a valid phone number.' });
 
     const { data: game } = await supabase.from('games').select('*').eq('share_code', shareCode).maybeSingle();
-    if (!game) return res.status(404).json({ error: 'Invite link is no longer valid.' });
+    // Protected games can only be entered with their passcode.
+    if (!game || isProtected(game)) return res.status(404).json({ error: 'Invite link is no longer valid.' });
 
     // Require name only when this phone is brand-new (or has no name yet).
     const { data: existing } = await supabase
@@ -346,7 +408,90 @@ app.post('/api/auth/invite-join', async (req, res) => {
       .insert({ user_id: user.id, game_id: game.id });
     if (memErr && memErr.code !== '23505') throw memErr;
 
-    res.json({ user, game });
+    res.json({ user, game: publicGame(game), token: tokenFor(user) });
+  } catch (e) { sendError(res, e); }
+});
+
+// ---------------------------------------------------------------------------
+// Passcode sign-in (protected games)
+// ---------------------------------------------------------------------------
+
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+// Per IP address. Generous because a whole staff may sign in from one office
+// network at the same meeting, and a few of them will mistype the passcode.
+const LOGIN_MAX_FAILS = 30;
+
+function clientIp(req) {
+  const fwd = String(req.header('x-forwarded-for') || '').split(',')[0].trim();
+  return (fwd || req.ip || 'unknown').slice(0, 64);
+}
+
+// Find-or-create the person for (game, name). The unique index on login_key
+// makes two phones signing in with the same name at once resolve to one row.
+async function findOrCreateUserByName(gameId, firstName, lastName) {
+  const key = loginKey(gameId, firstName, lastName);
+  const { data: hit, error: selErr } = await supabase
+    .from('users').select('*').eq('login_key', key).maybeSingle();
+  if (selErr) throw selErr;
+  if (hit) return hit;
+  const { data: created, error: insErr } = await supabase.from('users')
+    .insert({ first_name: firstName, last_name: lastName, login_key: key })
+    .select('*').maybeSingle();
+  if (!insErr && created) return created;
+  if (insErr && insErr.code !== '23505') throw insErr;
+  const { data: again, error: againErr } = await supabase
+    .from('users').select('*').eq('login_key', key).maybeSingle();
+  if (againErr) throw againErr;
+  if (!again) { const e = new Error('Could not sign you in. Please try again.'); e.status = 500; throw e; }
+  return again;
+}
+
+// POST /api/auth/passcode  body: { passcode, firstName, lastName }
+// The passcode picks the game: the shared staff passcode signs you in as a
+// player, the admin passcode signs you in as a player who can also manage
+// the cards. Your name is how the leaderboard knows you; type the same name
+// on a new phone and you pick up where you left off.
+app.post('/api/auth/passcode', async (req, res) => {
+  try {
+    assertEnv();
+    const passcode  = normalizePasscode(req.body?.passcode);
+    const firstName = cleanName(req.body?.firstName);
+    const lastName  = cleanName(req.body?.lastName);
+    if (!passcode)  return res.status(400).json({ error: 'Enter the passcode.' });
+    if (!firstName || !lastName) {
+      return res.status(400).json({ error: 'Enter your first and last name.' });
+    }
+
+    const ip = clientIp(req);
+    const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
+    const { count: fails, error: cErr } = await supabase.from('login_attempts')
+      .select('*', { count: 'exact', head: true }).eq('ip', ip).gte('created_at', since);
+    if (cErr) throw cErr;
+    if ((fails || 0) >= LOGIN_MAX_FAILS) {
+      return res.status(429).json({ error: 'Too many tries. Wait 15 minutes and try again.' });
+    }
+
+    const hash = hashPasscode(passcode);
+    const { data: games, error: gErr } = await supabase.from('games').select('*')
+      .or(`staff_code_hash.eq.${hash},admin_code_hash.eq.${hash}`).limit(1);
+    if (gErr) throw gErr;
+    const game = games?.[0];
+    if (!game) {
+      await supabase.from('login_attempts').insert({ ip });
+      // Keep the table small: old failures no longer count toward anything.
+      await supabase.from('login_attempts').delete()
+        .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+      return res.status(401).json({ error: 'That passcode is not right. Check it and try again.' });
+    }
+    const asAdmin = game.admin_code_hash === hash;
+
+    const user = await findOrCreateUserByName(game.id, firstName, lastName);
+    const { error: memErr } = await supabase.from('memberships')
+      .insert({ user_id: user.id, game_id: game.id });
+    if (memErr && memErr.code !== '23505') throw memErr;
+
+    const token = signSession({ u: user.id, g: game.id, cv: game.code_version, a: asAdmin ? 1 : 0 });
+    res.json({ user, token, game: publicGame(game), isAdmin: asAdmin });
   } catch (e) { sendError(res, e); }
 });
 
@@ -421,7 +566,7 @@ app.post('/api/auth/apple', async (req, res) => {
     const { user, isNew } = await findOrCreateUserByIdentity({
       appleUserId, email: tokenEmail, firstName, lastName,
     });
-    res.json({ user, isNew });
+    res.json({ user, isNew, token: tokenFor(user) });
   } catch (e) { sendError(res, e); }
 });
 
@@ -450,7 +595,7 @@ app.post('/api/auth/google', async (req, res) => {
     const { user, isNew } = await findOrCreateUserByIdentity({
       googleUserId, email, firstName, lastName,
     });
-    res.json({ user, isNew });
+    res.json({ user, isNew, token: tokenFor(user) });
   } catch (e) { sendError(res, e); }
 });
 
@@ -515,7 +660,8 @@ app.post('/api/auth/link-phone', async (req, res) => {
     await mergeUserInto(user.id, webUser.id);
 
     const { data: fresh } = await supabase.from('users').select('*').eq('id', webUser.id).maybeSingle();
-    res.json({ user: fresh || webUser });
+    // The surviving row has a different id, so the caller needs a new token.
+    res.json({ user: fresh || webUser, token: tokenFor(fresh || webUser) });
   } catch (e) { sendError(res, e); }
 });
 
@@ -859,7 +1005,11 @@ app.get('/api/me/games', async (req, res) => {
     const { data: games, error: gErr } = await supabase
       .from('games').select('*').in('id', ids);
     if (gErr) throw gErr;
-    res.json({ games });
+    // A passcode session is scoped to its one game. Other protected games are
+    // never listed (each needs its own passcode sign-in).
+    const s = req.session || {};
+    const visible = (games || []).filter(g => !isProtected(g) || s.g === g.id);
+    res.json({ games: visible.map(publicGame) });
   } catch (e) { sendError(res, e); }
 });
 
@@ -921,7 +1071,7 @@ app.post('/api/games', async (req, res) => {
       .insert({ user_id: user.id, game_id: game.id });
     if (memErr && memErr.code !== '23505') throw memErr;
 
-    res.json({ game });
+    res.json({ game: publicGame(game) });
   } catch (e) { sendError(res, e); }
 });
 
@@ -934,28 +1084,21 @@ app.post('/api/games/join', async (req, res) => {
     const { data: game, error: gErr } = await supabase
       .from('games').select('*').eq('share_code', code).maybeSingle();
     if (gErr) throw gErr;
-    if (!game) return res.status(404).json({ error: 'No game with that code.' });
+    // Protected games can only be entered with their passcode.
+    if (!game || isProtected(game)) return res.status(404).json({ error: 'No game with that code.' });
 
     const { error: insErr } = await supabase.from('memberships')
       .insert({ user_id: user.id, game_id: game.id });
     if (insErr && insErr.code !== '23505') throw insErr;
-    res.json({ game });
+    res.json({ game: publicGame(game) });
   } catch (e) { sendError(res, e); }
 });
 
 // GET /api/games/:id — full game (pairs + your role)
 app.get('/api/games/:id', async (req, res) => {
   try {
-    const user = await requireUser(req);
     const { id } = req.params;
-    const { data: game, error: gErr } = await supabase
-      .from('games').select('*').eq('id', id).maybeSingle();
-    if (gErr) throw gErr;
-    if (!game) return res.status(404).json({ error: 'Game not found.' });
-
-    const { data: mem } = await supabase.from('memberships')
-      .select('*').eq('user_id', user.id).eq('game_id', id).maybeSingle();
-    if (!mem) return res.status(403).json({ error: 'You are not in this game.' });
+    const game = req.game;   // loaded + membership-checked by the guard
 
     const pairs = await expectRead(
       `load pairs for game ${id}`,
@@ -964,7 +1107,7 @@ app.get('/api/games/:id', async (req, res) => {
         .order('sort_order', { ascending: true }),
     );
 
-    res.json({ game, pairs, isAdmin: game.admin_user_id === user.id });
+    res.json({ game: publicGame(game), pairs, isAdmin: !!req.isAdmin });
   } catch (e) { sendError(res, e); }
 });
 
@@ -974,18 +1117,17 @@ app.get('/api/games/:id', async (req, res) => {
 // every active Learn run has its per-card direction rewritten.
 app.put('/api/games/:id', async (req, res) => {
   try {
-    const user = await requireUser(req);
     const { id } = req.params;
-    const { data: game } = await supabase.from('games').select('*').eq('id', id).maybeSingle();
-    if (!game) return res.status(404).json({ error: 'Game not found.' });
-    if (game.admin_user_id !== user.id) return res.status(403).json({ error: 'Only the admin can update this game.' });
+    const game = req.game;
+    if (!req.isAdmin) return res.status(403).json({ error: 'Only the admin can update this game.' });
+    if (game.kind === 'faces') return res.status(400).json({ error: 'Photo games always show the photo first.' });
 
     const newDirection = req.body?.direction;
     if (!newDirection || !DIRECTIONS.includes(newDirection)) {
       return res.status(400).json({ error: 'Invalid direction.' });
     }
     if (newDirection === game.direction) {
-      return res.json({ game });
+      return res.json({ game: publicGame(game) });
     }
 
     const [updated] = await expectWrite(
@@ -1014,19 +1156,18 @@ app.put('/api/games/:id', async (req, res) => {
         .eq('user_id', r.user_id).eq('game_id', id);
     }
 
-    res.json({ game: updated });
+    res.json({ game: publicGame(updated) });
   } catch (e) { sendError(res, e); }
 });
 
 // POST /api/games/:id/pairs — admin adds new pairs after launch.
 app.post('/api/games/:id/pairs', async (req, res) => {
   try {
-    const user = await requireUser(req);
     const { id } = req.params;
     const newPairs = Array.isArray(req.body?.pairs) ? req.body.pairs : [];
-    const { data: game } = await supabase.from('games').select('*').eq('id', id).maybeSingle();
-    if (!game) return res.status(404).json({ error: 'Game not found.' });
-    if (game.admin_user_id !== user.id) return res.status(403).json({ error: 'Only the admin can add pairs.' });
+    const game = req.game;
+    if (!req.isAdmin) return res.status(403).json({ error: 'Only the admin can add pairs.' });
+    if (game.kind === 'faces') return res.status(400).json({ error: 'Use Manage Students for photo games.' });
 
     const clean = newPairs.map(p => ({
       term: String(p.term || '').trim(), definition: String(p.definition || '').trim(),
@@ -1049,6 +1190,49 @@ app.post('/api/games/:id/pairs', async (req, res) => {
   } catch (e) { sendError(res, e); }
 });
 
+// Push pair edits/deletes into everything already in flight for a game:
+//   - today's (and future) frozen quiz/test sets are dropped, so the next load
+//     builds a fresh set. Already-submitted attempts keep their locked score.
+//   - active Learn runs are patched in place: edited text flows into the run's
+//     card snapshot, deleted cards leave the cards map and the queue.
+async function applyPairChanges(gameId, { deletedIds = new Set(), updatedById = new Map() } = {}) {
+  const today = easternDateString();
+  await supabase.from('daily_question_sets').delete()
+    .eq('game_id', gameId).gte('date_et', today);
+
+  if (deletedIds.size === 0 && updatedById.size === 0) return;
+  const { data: runs } = await supabase.from('learn_runs')
+    .select('user_id, state').eq('game_id', gameId);
+  for (const r of (runs || [])) {
+    const state = r.state || {};
+    if (!state.cards) continue;
+    let dirty = false;
+    for (const cid of Object.keys(state.cards)) {
+      if (deletedIds.has(cid)) {
+        delete state.cards[cid];
+        state.queue = (state.queue || []).filter(q => q !== cid);
+        dirty = true;
+      } else if (updatedById.has(cid)) {
+        const u = updatedById.get(cid);
+        state.cards[cid].term = u.term;
+        state.cards[cid].definition = u.definition;
+        dirty = true;
+      }
+    }
+    if (!dirty) continue;
+    state.totalCards = Object.keys(state.cards).length;
+    // If every remaining card is mastered, mark the run complete so the
+    // next load offers a reset rather than a stuck "next card".
+    const remaining = Object.values(state.cards);
+    if (remaining.length > 0 && remaining.every(c => c.mastered) && !state.completedAt) {
+      state.completedAt = new Date().toISOString();
+    }
+    await supabase.from('learn_runs')
+      .update({ state, updated_at: new Date().toISOString() })
+      .eq('user_id', r.user_id).eq('game_id', gameId);
+  }
+}
+
 // PUT /api/games/:id/pairs — admin "Edit Pairs": diff-save the full editable
 // list. Changes apply IMMEDIATELY:
 //   - Today's (and future) daily_question_sets are deleted so the next quiz/
@@ -1065,13 +1249,12 @@ app.post('/api/games/:id/pairs', async (req, res) => {
 //   - Pairs in DB (non-deleted) NOT present in body -> soft-delete.
 app.put('/api/games/:id/pairs', async (req, res) => {
   try {
-    const user = await requireUser(req);
     const { id } = req.params;
     const incoming = Array.isArray(req.body?.pairs) ? req.body.pairs : [];
 
-    const { data: game } = await supabase.from('games').select('*').eq('id', id).maybeSingle();
-    if (!game) return res.status(404).json({ error: 'Game not found.' });
-    if (game.admin_user_id !== user.id) return res.status(403).json({ error: 'Only the admin can edit pairs.' });
+    const game = req.game;
+    if (!req.isAdmin) return res.status(403).json({ error: 'Only the admin can edit pairs.' });
+    if (game.kind === 'faces') return res.status(400).json({ error: 'Use Manage Students for photo games.' });
 
     const clean = incoming.map(p => ({
       id: p.id ? String(p.id) : null,
@@ -1135,11 +1318,6 @@ app.put('/api/games/:id/pairs', async (req, res) => {
 
     // Apply immediately: regenerate today's quiz/test and push edits/deletes
     // into every active Learn run for this game.
-    const today = easternDateString();
-    await supabase.from('daily_question_sets').delete()
-      .eq('game_id', id).gte('date_et', today);
-
-    const deletedIds = new Set(toDelete);
     const updatedById = new Map();
     for (const row of clean) {
       if (!row.id) continue;
@@ -1149,41 +1327,248 @@ app.put('/api/games/:id/pairs', async (req, res) => {
         updatedById.set(row.id, { term: row.term, definition: row.definition });
       }
     }
-
-    if (deletedIds.size > 0 || updatedById.size > 0) {
-      const { data: runs } = await supabase.from('learn_runs')
-        .select('user_id, state').eq('game_id', id);
-      for (const r of (runs || [])) {
-        const state = r.state || {};
-        if (!state.cards) continue;
-        let dirty = false;
-        for (const cid of Object.keys(state.cards)) {
-          if (deletedIds.has(cid)) {
-            delete state.cards[cid];
-            state.queue = (state.queue || []).filter(q => q !== cid);
-            dirty = true;
-          } else if (updatedById.has(cid)) {
-            const u = updatedById.get(cid);
-            state.cards[cid].term = u.term;
-            state.cards[cid].definition = u.definition;
-            dirty = true;
-          }
-        }
-        if (!dirty) continue;
-        state.totalCards = Object.keys(state.cards).length;
-        // If every remaining card is mastered, mark the run complete so the
-        // next load offers a reset rather than a stuck "next card".
-        const remaining = Object.values(state.cards);
-        if (remaining.length > 0 && remaining.every(c => c.mastered) && !state.completedAt) {
-          state.completedAt = new Date().toISOString();
-        }
-        await supabase.from('learn_runs')
-          .update({ state, updated_at: new Date().toISOString() })
-          .eq('user_id', r.user_id).eq('game_id', id);
-      }
-    }
+    await applyPairChanges(id, { deletedIds: new Set(toDelete), updatedById });
 
     res.json({ ok: true, deleted: toDelete.length, updated: updatedCount, inserted: inserts.length });
+  } catch (e) { sendError(res, e); }
+});
+
+// ===========================================================================
+// PHOTO GAMES ("faces"): a card is a student's photo (front) + name (back).
+// The name lives in pairs.definition; pairs.term is a fixed placeholder so the
+// existing Learn / Quiz / Test engines work unchanged (direction is always
+// 'term': show the photo, recall the name). The photo itself is stored in
+// pair_photos and only ever leaves the server through the route below, to a
+// signed-in member of the game.
+// ===========================================================================
+
+const FACE_TERM = '(photo)';
+const MAX_PHOTO_BYTES = 300 * 1024;
+
+// Accepts a JPEG data URL (what the in-app cropper produces) and returns bare
+// base64, or throws a 400 the admin can act on.
+function parsePhoto(input) {
+  const bad = (msg) => { const e = new Error(msg); e.status = 400; return e; };
+  const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(input || ''));
+  if (!m) throw bad('That photo could not be read. Please choose it again.');
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length < 100 || buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) {
+    throw bad('That photo could not be read. Please choose it again.');
+  }
+  if (buf.length > MAX_PHOTO_BYTES) throw bad('That photo is too large. Please try again.');
+  return buf.toString('base64');
+}
+
+function requireFacesAdmin(req, res) {
+  if (!req.isAdmin) { res.status(403).json({ error: 'Only the admin can manage students.' }); return false; }
+  if (req.game.kind !== 'faces') { res.status(400).json({ error: 'This game does not use photos.' }); return false; }
+  return true;
+}
+
+async function loadLivePair(gameId, pairId) {
+  if (!UUID_RE.test(pairId)) return null;
+  const { data, error } = await supabase.from('pairs').select('*')
+    .eq('id', pairId).eq('game_id', gameId).is('deleted_at', null).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+// GET /api/games/:id/photos/:pairId — the card's photo, members only.
+// The client asks for ?v=<photo_version>, so a given URL never changes and
+// can be cached for good on that device (private = never by shared caches).
+app.get('/api/games/:id/photos/:pairId', async (req, res) => {
+  try {
+    const { id, pairId } = req.params;
+    if (!UUID_RE.test(pairId)) return res.status(404).json({ error: 'No photo.' });
+    const { data, error } = await supabase.from('pair_photos')
+      .select('data').eq('pair_id', pairId).eq('game_id', id).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'No photo.' });
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=31536000, immutable');
+    res.send(Buffer.from(data.data, 'base64'));
+  } catch (e) { sendError(res, e); }
+});
+
+// POST /api/games/:id/students  body: { name, photo }  [admin]
+app.post('/api/games/:id/students', async (req, res) => {
+  try {
+    if (!requireFacesAdmin(req, res)) return;
+    const { id } = req.params;
+    const name = cleanName(req.body?.name);
+    if (!name) return res.status(400).json({ error: 'Enter the student\'s name.' });
+    const photo = parsePhoto(req.body?.photo);
+
+    const { data: last } = await supabase.from('pairs').select('sort_order')
+      .eq('game_id', id).order('sort_order', { ascending: false }).limit(1).maybeSingle();
+    const [pair] = await expectWrite(
+      `add student to game ${id}`,
+      1,
+      supabase.from('pairs').insert({
+        game_id: id, term: FACE_TERM, definition: name,
+        sort_order: (last?.sort_order || 0) + 1, photo_version: 1,
+      }).select('*'),
+    );
+    const { error: phErr } = await supabase.from('pair_photos')
+      .insert({ pair_id: pair.id, game_id: id, data: photo });
+    if (phErr) {
+      // Never leave a card behind without its photo.
+      await supabase.from('pairs').delete().eq('id', pair.id);
+      throw phErr;
+    }
+    res.json({ pair });
+  } catch (e) { sendError(res, e); }
+});
+
+// PUT /api/games/:id/students/:pairId  body: { name?, photo? }  [admin]
+app.put('/api/games/:id/students/:pairId', async (req, res) => {
+  try {
+    if (!requireFacesAdmin(req, res)) return;
+    const { id, pairId } = req.params;
+    const prev = await loadLivePair(id, pairId);
+    if (!prev) return res.status(404).json({ error: 'That student is no longer in the list.' });
+
+    const patch = {};
+    const hasName = req.body?.name !== undefined;
+    const name = hasName ? cleanName(req.body.name) : prev.definition;
+    if (hasName && !name) return res.status(400).json({ error: 'Enter the student\'s name.' });
+    if (name !== prev.definition) patch.definition = name;
+
+    if (req.body?.photo) {
+      const photo = parsePhoto(req.body.photo);
+      const { error: phErr } = await supabase.from('pair_photos').upsert(
+        { pair_id: pairId, game_id: id, data: photo, updated_at: new Date().toISOString() },
+        { onConflict: 'pair_id' });
+      if (phErr) throw phErr;
+      patch.photo_version = (prev.photo_version || 0) + 1;
+    }
+
+    let pair = prev;
+    if (Object.keys(patch).length) {
+      [pair] = await expectWrite(
+        `update student ${pairId}`,
+        1,
+        supabase.from('pairs').update(patch).eq('id', pairId).select('*'),
+      );
+    }
+    if (patch.definition) {
+      await applyPairChanges(id, {
+        updatedById: new Map([[pairId, { term: prev.term, definition: name }]]),
+      });
+    }
+    res.json({ pair });
+  } catch (e) { sendError(res, e); }
+});
+
+// DELETE /api/games/:id/students/:pairId  [admin]
+// The card is soft-deleted (attempts already taken still reference it) but the
+// photo itself is removed for good.
+app.delete('/api/games/:id/students/:pairId', async (req, res) => {
+  try {
+    if (!requireFacesAdmin(req, res)) return;
+    const { id, pairId } = req.params;
+    const prev = await loadLivePair(id, pairId);
+    if (!prev) return res.json({ ok: true });
+    await expectWrite(
+      `remove student ${pairId}`,
+      1,
+      supabase.from('pairs')
+        .update({ deleted_at: new Date().toISOString(), photo_version: null })
+        .eq('id', pairId).select('id'),
+    );
+    const { error: phErr } = await supabase.from('pair_photos').delete().eq('pair_id', pairId);
+    if (phErr) throw phErr;
+    await applyPairChanges(id, { deletedIds: new Set([pairId]) });
+    res.json({ ok: true });
+  } catch (e) { sendError(res, e); }
+});
+
+// PUT /api/games/:id/passcodes  body: { staffPasscode?, adminPasscode? }  [admin]
+// Changing either passcode signs every device out (code_version bump); the
+// admin making the change gets a fresh token back so they stay signed in.
+app.put('/api/games/:id/passcodes', async (req, res) => {
+  try {
+    const user = await requireUser(req);
+    const game = req.game;
+    if (!req.isAdmin || !isProtected(game)) {
+      return res.status(403).json({ error: 'Only the admin can change passcodes.' });
+    }
+    const staff = normalizePasscode(req.body?.staffPasscode);
+    const admin = normalizePasscode(req.body?.adminPasscode);
+    if (!staff && !admin) return res.status(400).json({ error: 'Enter a new passcode.' });
+    if (staff && staff.length < 4) return res.status(400).json({ error: 'The staff passcode needs at least 4 characters.' });
+    if (admin && admin.length < 6) return res.status(400).json({ error: 'The admin passcode needs at least 6 characters.' });
+
+    const staffHash = staff ? hashPasscode(staff) : game.staff_code_hash;
+    const adminHash = admin ? hashPasscode(admin) : game.admin_code_hash;
+    if (staffHash === adminHash) {
+      return res.status(400).json({ error: 'The staff and admin passcodes must be different.' });
+    }
+    // A passcode identifies its game, so it cannot collide with another game's.
+    const { data: clash, error: cErr } = await supabase.from('games').select('id')
+      .neq('id', game.id)
+      .or(`staff_code_hash.in.(${staffHash},${adminHash}),admin_code_hash.in.(${staffHash},${adminHash})`)
+      .limit(1);
+    if (cErr) throw cErr;
+    if (clash?.length) return res.status(400).json({ error: 'That passcode is already in use. Pick a different one.' });
+
+    const [updated] = await expectWrite(
+      `change passcodes for game ${game.id}`,
+      1,
+      supabase.from('games').update({
+        staff_code_hash: staffHash, admin_code_hash: adminHash,
+        code_version: (game.code_version || 1) + 1,
+      }).eq('id', game.id).select('*'),
+    );
+    const token = signSession({ u: user.id, g: updated.id, cv: updated.code_version, a: 1 });
+    res.json({ ok: true, token });
+  } catch (e) { sendError(res, e); }
+});
+
+// DELETE /api/games/:id/members/:userId  [admin]
+// Takes a person off the leaderboard (someone who left, or a mistyped name).
+// People created by passcode sign-in exist only for this game, so the whole
+// row goes; anyone else just loses their membership and history in this game.
+app.delete('/api/games/:id/members/:userId', async (req, res) => {
+  try {
+    const me = await requireUser(req);
+    const game = req.game;
+    const { userId } = req.params;
+    if (!req.isAdmin) return res.status(403).json({ error: 'Only the admin can remove people.' });
+    if (!UUID_RE.test(userId)) return res.status(404).json({ error: 'Person not found.' });
+    if (userId === me.id) return res.status(400).json({ error: 'You cannot remove yourself.' });
+    if (userId === game.admin_user_id) return res.status(400).json({ error: 'That account cannot be removed.' });
+
+    const { data: target, error: tErr } = await supabase.from('users')
+      .select('id, login_key').eq('id', userId).maybeSingle();
+    if (tErr) throw tErr;
+    if (!target) return res.json({ ok: true });
+
+    if (target.login_key && target.login_key.startsWith(`${game.id}:`)) {
+      const { error } = await supabase.from('users').delete().eq('id', userId);
+      if (error) throw error;
+    } else {
+      for (const table of ['memberships', 'points_ledger', 'learn_runs', 'quiz_attempts',
+        'test_attempts', 'activity_log', 'daily_rank_snapshots']) {
+        const { error } = await supabase.from(table).delete()
+          .eq('user_id', userId).eq('game_id', game.id);
+        if (error) throw error;
+      }
+    }
+    res.json({ ok: true });
+  } catch (e) { sendError(res, e); }
+});
+
+// POST /api/games/:id/activity — count today toward the caller's calendar and
+// streak. Used by the Flashcards tab, which earns no points on its own.
+app.post('/api/games/:id/activity', async (req, res) => {
+  try {
+    const user = await requireUser(req);
+    const { error } = await supabase.from('activity_log').upsert(
+      { user_id: user.id, game_id: req.game.id, date_et: easternDateString() },
+      { onConflict: 'user_id,game_id,date_et' });
+    if (error) throw error;
+    res.json({ ok: true });
   } catch (e) { sendError(res, e); }
 });
 
@@ -1196,11 +1581,6 @@ app.get('/api/games/:id/leaderboard', async (req, res) => {
   try {
     const user = await requireUser(req);
     const { id } = req.params;
-
-    // membership check
-    const { data: mem } = await supabase.from('memberships')
-      .select('user_id').eq('user_id', user.id).eq('game_id', id).maybeSingle();
-    if (!mem) return res.status(403).json({ error: 'Not in this game.' });
 
     const { data: members } = await supabase.from('memberships')
       .select('user_id').eq('game_id', id);
@@ -1270,6 +1650,19 @@ app.get('/api/games/:id/leaderboard', async (req, res) => {
 // QUIZ / TEST  (deterministic per-day question set)
 // ===========================================================================
 
+function answerKeyOf(v) { return String(v ?? '').trim().toLowerCase(); }
+function uniqueWrongAnswers(candidates, correct) {
+  const seen = new Set([answerKeyOf(correct)]);
+  const out = [];
+  for (const c of candidates) {
+    const k = answerKeyOf(c);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(c);
+  }
+  return out;
+}
+
 function buildDailyQuestions(pairs, length, seedStr, direction = 'shuffle') {
   if (pairs.length < length) return null;
   const rng = seededRng(seedStr);
@@ -1285,9 +1678,13 @@ function buildDailyQuestions(pairs, length, seedStr, direction = 'shuffle') {
       : coin < 0.5;
     const promptKey = showDefinition ? 'definition' : 'term';
     const answerKey = showDefinition ? 'term' : 'definition';
-    const distractors = shuffleWith(rng, pairs.filter(x => x.id !== p.id))
-      .slice(0, MC_OPTION_COUNT - 1)
-      .map(x => x[answerKey]);
+    // Distinct wrong answers only: two cards can share an answer (two students
+    // with the same first name), and a repeated or "also correct" option would
+    // make the question unanswerable.
+    const distractors = uniqueWrongAnswers(
+      shuffleWith(rng, pairs.filter(x => x.id !== p.id)).map(x => x[answerKey]),
+      p[answerKey],
+    ).slice(0, MC_OPTION_COUNT - 1);
     const opts = shuffleWith(rng, [p[answerKey], ...distractors]);
     return {
       pairId: p.id,
@@ -1336,11 +1733,7 @@ async function quizOrTestGet(req, res, kind) {
   const length = kind === 'quiz' ? QUIZ_LENGTH : TEST_LENGTH;
   const table  = kind === 'quiz' ? 'quiz_attempts' : 'test_attempts';
 
-  const { data: game } = await supabase.from('games').select('*').eq('id', id).maybeSingle();
-  if (!game) return res.status(404).json({ error: 'Game not found.' });
-  const { data: mem } = await supabase.from('memberships')
-    .select('user_id').eq('user_id', user.id).eq('game_id', id).maybeSingle();
-  if (!mem) return res.status(403).json({ error: 'Not in this game.' });
+  const game = req.game;
 
   const dateEt = easternDateString();
   const direction = normalizeDirection(game.direction);
@@ -1377,8 +1770,7 @@ async function quizOrTestSubmit(req, res, kind) {
   const maxPts = kind === 'quiz' ? QUIZ_MAX_POINTS : TEST_MAX_POINTS;
   const table  = kind === 'quiz' ? 'quiz_attempts' : 'test_attempts';
 
-  const { data: game } = await supabase.from('games').select('*').eq('id', id).maybeSingle();
-  if (!game) return res.status(404).json({ error: 'Game not found.' });
+  const game = req.game;
 
   const dateEt = easternDateString();
   const existing = await getDailyAttempt(table, user.id, id, dateEt);
@@ -1562,7 +1954,7 @@ async function buildNextCardPayload(state, gameId) {
       const j = Math.floor(Math.random() * (i + 1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
     }
-    const distractors = pool.slice(0, MC_OPTION_COUNT - 1);
+    const distractors = uniqueWrongAnswers(pool, cardState[answerKey]).slice(0, MC_OPTION_COUNT - 1);
     const options = [...distractors, cardState[answerKey]];
     for (let i = options.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -1620,11 +2012,7 @@ app.get('/api/games/:id/learn', async (req, res) => {
   try {
     const user = await requireUser(req);
     const { id } = req.params;
-    const { data: game } = await supabase.from('games').select('*').eq('id', id).maybeSingle();
-    if (!game) return res.status(404).json({ error: 'Game not found.' });
-    const { data: mem } = await supabase.from('memberships')
-      .select('user_id').eq('user_id', user.id).eq('game_id', id).maybeSingle();
-    if (!mem) return res.status(403).json({ error: 'Not in this game.' });
+    const game = req.game;
 
     const direction = normalizeDirection(game.direction);
     let { state } = await loadOrInitRun(user.id, id, direction);
@@ -1650,8 +2038,7 @@ app.post('/api/games/:id/learn/answer', async (req, res) => {
     const pairId = String(req.body?.pairId || '');
     const isCorrect = !!req.body?.isCorrect;
 
-    const { data: game } = await supabase.from('games').select('*').eq('id', id).maybeSingle();
-    if (!game) return res.status(404).json({ error: 'Game not found.' });
+    const game = req.game;
 
     const direction = normalizeDirection(game.direction);
     let { state } = await loadOrInitRun(user.id, id, direction);
@@ -1774,8 +2161,7 @@ app.post('/api/games/:id/learn/exit', async (req, res) => {
   try {
     const user = await requireUser(req);
     const { id } = req.params;
-    const { data: game } = await supabase.from('games').select('direction').eq('id', id).maybeSingle();
-    const direction = normalizeDirection(game?.direction);
+    const direction = normalizeDirection(req.game?.direction);
     const { state } = await loadOrInitRun(user.id, id, direction);
     const masters = Object.values(state.cards).filter(c => c.mastered).length;
     const slice = LEARN_RUN_POINTS / Math.max(state.totalCards, 1);
@@ -1796,8 +2182,7 @@ app.post('/api/games/:id/learn/reset', async (req, res) => {
   try {
     const user = await requireUser(req);
     const { id } = req.params;
-    const { data: game } = await supabase.from('games').select('direction').eq('id', id).maybeSingle();
-    const direction = normalizeDirection(game?.direction);
+    const direction = normalizeDirection(req.game?.direction);
     const pairs = await expectRead(
       `load pairs for Learn reset on game ${id}`,
       supabase.from('pairs').select('id, term, definition')
@@ -1818,10 +2203,6 @@ app.get('/api/games/:id/profile', async (req, res) => {
   try {
     const user = await requireUser(req);
     const { id } = req.params;
-    const { data: mem } = await supabase.from('memberships')
-      .select('user_id').eq('user_id', user.id).eq('game_id', id).maybeSingle();
-    if (!mem) return res.status(403).json({ error: 'Not in this game.' });
-
     // Same source as the leaderboard (v_user_game_totals) so the profile total
     // and the leaderboard total are identical by construction and can't drift.
     const { data: totalsRow } = await supabase.from('v_user_game_totals')

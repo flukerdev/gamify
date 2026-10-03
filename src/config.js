@@ -3,6 +3,12 @@
 // Edit values here; do not scatter magic numbers in components or routes.
 // ============================================================================
 
+// ---------- Branding ----------
+// This deployment is the ministry's name-learning app. APP_NAME is the full
+// title; BRAND_LETTER is the mark shown in the round logo and loading spinner.
+export const APP_NAME = 'STS - Know your Names!';
+export const BRAND_LETTER = 'S';
+
 // ---------- Scoring ----------
 // Quiz: graded on accuracy. 5 questions, points = number correct (max 5).
 export const QUIZ_LENGTH = 5;

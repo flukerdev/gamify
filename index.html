@@ -3,31 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <!-- Apple Touch Icon: iMessage and iOS use this as the brand mark for
-         home-screen pins and as a small fallback in link unfurls when no
-         og:image is rendered. -->
-    <link rel="apple-touch-icon" href="/og.svg" />
+    <!-- Home-screen install. iOS needs a PNG touch icon (it ignores SVG). -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#ffffff" />
-    <title>Gamify</title>
-    <meta name="description" content="A friendly score battle with the people you love." />
-
-    <!-- Open Graph (iMessage, WhatsApp, Slack, Facebook). -->
-    <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="Gamify" />
-    <meta property="og:title" content="Gamify" />
-    <meta property="og:description" content="A friendly score battle with the people you love." />
-    <meta property="og:image" content="/og.svg" />
-    <meta property="og:image:type" content="image/svg+xml" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Gamify" />
-
-    <!-- Twitter Card. -->
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Gamify" />
-    <meta name="twitter:description" content="A friendly score battle with the people you love." />
-    <meta name="twitter:image" content="/og.svg" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="STS Names" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!-- Staff-only app with photos of students: keep it out of search results
+         and link previews. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
+    <title>STS - Know your Names!</title>
+    <meta name="description" content="Staff sign-in required." />
   </head>
   <body>
     <div id="root"></div>

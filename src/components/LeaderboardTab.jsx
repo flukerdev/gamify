@@ -64,10 +64,13 @@ export default function LeaderboardTab({ user, game }) {
     <div className="tab-pad">
       <div className="lb-head">
         <h1 className="tab-title">Leaderboard</h1>
-        <div className="lb-head-actions">
-          <button className="btn btn-secondary small" onClick={shareLeaderboard}>Share leaderboard</button>
-          <button className="btn btn-secondary small" onClick={() => setShowInvite(true)}>Invite</button>
-        </div>
+        {game.protected ? null : (
+          // Passcode games are not joined by link, so there is nothing to share.
+          <div className="lb-head-actions">
+            <button className="btn btn-secondary small" onClick={shareLeaderboard}>Share leaderboard</button>
+            <button className="btn btn-secondary small" onClick={() => setShowInvite(true)}>Invite</button>
+          </div>
+        )}
       </div>
       {shareToast ? <div className="share-toast" role="status">{shareToast}</div> : null}
 

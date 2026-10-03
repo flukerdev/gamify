@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import Loading from './Loading.jsx';
+import FacePhoto from './FacePhoto.jsx';
 
 // Shared component for both the daily Quiz and the daily Test.
 // Behavior matches the spec:
@@ -29,7 +30,15 @@ export default function QuizOrTest({ game, kind, length, onGoToLeaderboard }) {
   }
   useEffect(() => { load(); }, [game.id, kind]);
 
-  if (err) return <div className="form-error">{err}</div>;
+  const isFaces = game.kind === 'faces';
+  const noun = isFaces ? 'students' : 'pairs';
+
+  if (err && !data) return (
+    <div className="tab-pad">
+      <div className="form-error">{err}</div>
+      <button className="btn btn-secondary" onClick={load}>Try again</button>
+    </div>
+  );
   if (!data) return <Loading />;
   if (!data.available) {
     return (
@@ -37,7 +46,7 @@ export default function QuizOrTest({ game, kind, length, onGoToLeaderboard }) {
         <h1 className="tab-title">{kind === 'quiz' ? 'Daily Quiz' : 'Daily Test'}</h1>
         <div className="empty-card">
           <h3>Not enough content yet</h3>
-          <p>This game needs at least {length} pairs before {kind === 'quiz' ? 'a quiz' : 'a test'} is available.</p>
+          <p>This game needs at least {length} {noun} before {kind === 'quiz' ? 'a quiz' : 'a test'} is available.</p>
           <p className="muted small">Have {data.have} of {data.needed}.</p>
         </div>
       </div>
@@ -53,6 +62,7 @@ export default function QuizOrTest({ game, kind, length, onGoToLeaderboard }) {
     // locked attempt rows. Indexes line up because both arrays are ordered.
     const recap = (result.answers || []).map((a, i) => ({
       idx: i,
+      pairId: a.pairId,
       prompt: data?.questions?.[i]?.prompt || '',
       chosen: a.chosen,
       correct: a.correct,
@@ -82,7 +92,9 @@ export default function QuizOrTest({ game, kind, length, onGoToLeaderboard }) {
                 <li key={r.idx} className={`recap-item ${r.isCorrect ? 'ok' : 'no'}`}>
                   <div className="recap-head">
                     <span className="recap-badge" aria-hidden="true">{r.isCorrect ? '✓' : '✗'}</span>
-                    <span className="recap-prompt">{r.prompt}</span>
+                    {isFaces
+                      ? <FacePhoto gameId={game.id} pairId={r.pairId} size={44} className="round" />
+                      : <span className="recap-prompt">{r.prompt}</span>}
                   </div>
                   <div className="recap-row">
                     <span className="recap-label">Your answer:</span>
@@ -120,11 +132,16 @@ export default function QuizOrTest({ game, kind, length, onGoToLeaderboard }) {
       return;
     }
     setBusy(true);
+    setErr('');
     try {
       const out = await api.post(`/api/games/${game.id}/${kind}`, { answers });
       setResult(out.attempt);
       setJustEarnedPoints(Number(out.points || 0));
-    } catch (e) { setErr(e.message); }
+    } catch (e) {
+      // Already taken (e.g. submitted from another phone): show that result.
+      if (e.status === 409 && e.data?.attempt) setResult(e.data.attempt);
+      else setErr(e.message);
+    }
     setBusy(false);
   }
 
@@ -141,7 +158,9 @@ export default function QuizOrTest({ game, kind, length, onGoToLeaderboard }) {
       </div>
 
       <div className="qt-card">
-        <div className="qt-prompt">{q.prompt}</div>
+        {isFaces
+          ? <FacePhoto gameId={game.id} pairId={q.pairId} className="card-photo" />
+          : <div className="qt-prompt">{q.prompt}</div>}
         <div className="qt-options">
           {q.options.map((opt, i) => (
             <button

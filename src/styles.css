@@ -921,3 +921,184 @@ body[data-tour-spotlight="rank"] .lb-row.me {
    the page reads as one calm block. */
 .recap-value.ok-text, .recap-value.no-text { color: var(--fg); }
 
+
+/* ===========================================================================
+   Photo games (STS - Know your Names!)
+   =========================================================================== */
+
+.visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* Use the small-viewport unit where supported so nothing hides under mobile
+   browser chrome (100vh is taller than the visible screen on iOS Safari). */
+@supports (min-height: 100svh) {
+  .auth-wrap, .hub, .shell { min-height: 100svh; }
+}
+/* Keep content clear of the notch / home indicator once installed. */
+.content { padding-bottom: calc(32px + env(safe-area-inset-bottom)); }
+.nav-toggle { top: calc(12px + env(safe-area-inset-top)); }
+.sidebar { padding-top: calc(18px + env(safe-area-inset-top)); padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+@media (max-width: 899px) {
+  .content { padding-top: calc(70px + env(safe-area-inset-top)); }
+  /* Room for the menu button, which floats over the top-left of the sidebar. */
+  .sidebar-top { padding-top: 54px; }
+}
+
+.auth-submit { margin-top: 16px; }
+.brand-title { line-height: 1.2; }
+
+.btn-danger { background: var(--no); color: #fff; }
+.btn-danger:hover:not(:disabled) { filter: brightness(0.95); }
+
+/* ---------- mobile menu backdrop ---------- */
+.nav-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.25); z-index: 24; }
+@media (min-width: 900px) { .nav-backdrop { display: none; } }
+.game-switcher.static { cursor: default; }
+.game-switcher.static:hover { background: transparent; }
+
+/* ---------- photo ---------- */
+.face-photo {
+  position: relative; width: 100%; aspect-ratio: 1 / 1;
+  border-radius: var(--radius-lg); overflow: hidden;
+  background: var(--line-2); flex-shrink: 0;
+}
+.face-photo img { width: 100%; height: 100%; object-fit: cover; display: block; user-select: none; -webkit-user-drag: none; }
+.face-photo.round { border-radius: 999px; }
+.face-photo-loading {
+  position: absolute; inset: 0;
+  background: linear-gradient(100deg, var(--line-2) 30%, #fff 50%, var(--line-2) 70%);
+  background-size: 200% 100%; animation: photoShimmer 1.2s linear infinite;
+}
+@keyframes photoShimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.face-photo-empty { position: absolute; inset: 0; width: 100%; height: 100%; fill: #d1d5db; background: var(--line-2); }
+
+/* Photo as the prompt in Learn / Quiz / Test. */
+.card-photo { max-width: 260px; margin: 0 auto 16px; }
+@media (max-height: 700px) { .card-photo { max-width: 200px; } }
+.recap-head .face-photo { margin-left: 2px; }
+
+/* ---------- flashcards ---------- */
+.flash-pad { max-width: 460px; }
+.flip-card {
+  appearance: none; border: 0; background: transparent; padding: 0; cursor: pointer;
+  display: block; width: 100%; max-width: 380px; margin: 0 auto;
+  aspect-ratio: 1 / 1; perspective: 1200px;
+  -webkit-tap-highlight-color: transparent; font-family: inherit; color: inherit;
+}
+.flip-inner {
+  position: relative; width: 100%; height: 100%;
+  transition: transform 420ms var(--ease);
+  transform-style: preserve-3d; -webkit-transform-style: preserve-3d;
+}
+.flip-card.flipped .flip-inner { transform: rotateY(180deg); }
+.flip-face {
+  position: absolute; inset: 0; border-radius: var(--radius-lg); overflow: hidden;
+  backface-visibility: hidden; -webkit-backface-visibility: hidden;
+  border: 1px solid var(--line); box-shadow: var(--shadow-2); background: var(--surface);
+}
+.flip-front .face-photo { border-radius: 0; height: 100%; }
+.flip-back {
+  transform: rotateY(180deg);
+  display: flex; align-items: center; justify-content: center; padding: 18px;
+}
+.flip-name {
+  font-size: clamp(30px, 10vw, 48px); font-weight: 800; letter-spacing: -0.02em;
+  line-height: 1.1; text-align: center; overflow-wrap: anywhere;
+}
+.flash-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 380px; margin: 18px auto 0; }
+.flash-actions.single { grid-template-columns: 1fr; }
+.flash-btn { width: 100%; min-height: 52px; font-size: 16px; }
+.flash-btn.no { color: var(--no); }
+.flash-hint { text-align: center; }
+.flash-done-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
+@media (prefers-reduced-motion: reduce) { .flip-inner { transition: none; } }
+
+/* ---------- manage sheet ---------- */
+.modal.sheet { max-width: 520px; }
+@media (max-width: 640px) {
+  /* Full-screen on phones: the keyboard and the cropper both need the room. */
+  .modal-wrap:has(.modal.sheet) { padding: 0; align-items: stretch; }
+  .modal.sheet { max-height: none; height: 100%; border-radius: 0; }
+  .modal.sheet .modal-head { padding-top: calc(14px + env(safe-area-inset-top)); }
+  .modal.sheet .modal-body { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+}
+.modal.sheet .modal-body { flex: 1; }
+
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; background: var(--line-2); padding: 4px; border-radius: var(--radius); margin-bottom: 14px; }
+.seg-btn {
+  appearance: none; border: 0; background: transparent; cursor: pointer; font-family: inherit;
+  padding: 10px 6px; border-radius: var(--radius-sm); font-size: 14px; font-weight: 600; color: var(--muted); min-height: 40px;
+}
+.seg-btn.on { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-1); }
+.saved-note { background: var(--ok-soft); color: #065f46; border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; margin-bottom: 12px; }
+
+.add-student { width: 100%; }
+.student-count { margin: 12px 2px 8px; }
+.student-list { display: flex; flex-direction: column; gap: 6px; }
+.student-row {
+  appearance: none; font-family: inherit; color: inherit; text-align: left; cursor: pointer;
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 8px 12px 8px 8px; min-height: 68px;
+}
+.student-row:hover { background: var(--surface-2); }
+.student-name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.student-edit { color: var(--muted); font-size: 13px; }
+.person-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; min-height: 60px;
+}
+.person-main { display: flex; flex-direction: column; min-width: 0; }
+.person-confirm { display: flex; gap: 6px; flex-shrink: 0; }
+
+.student-editor { display: flex; flex-direction: column; }
+.editor-photo { width: 100%; max-width: 240px; margin: 0 auto 12px; }
+.photo-drop {
+  appearance: none; font-family: inherit; cursor: pointer; width: 100%; aspect-ratio: 1 / 1;
+  border: 2px dashed var(--line); border-radius: var(--radius-lg); background: var(--surface-2);
+  color: var(--muted); font-size: 15px; font-weight: 600;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+}
+.photo-drop-plus { font-size: 40px; line-height: 1; color: var(--fg); }
+.editor-photo-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 4px; }
+.editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.danger-zone { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--line-2); }
+.danger-zone.open { margin-top: 16px; }
+.danger-link { color: var(--no); padding-left: 0; }
+.danger-text { margin: 0; font-size: 14px; }
+
+/* ---------- cropper ---------- */
+.cropper { display: flex; flex-direction: column; align-items: center; }
+.crop-frame {
+  position: relative; width: 100%; max-width: 340px; aspect-ratio: 1 / 1;
+  overflow: hidden; border-radius: var(--radius-lg); background: #111;
+  touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none;
+}
+.crop-frame:active { cursor: grabbing; }
+.crop-img {
+  position: absolute; top: 0; left: 0; max-width: none; transform-origin: 0 0;
+  pointer-events: none; user-select: none; -webkit-user-drag: none; will-change: transform;
+}
+/* Oval guide: where the face should sit. Purely visual. */
+.crop-guide {
+  position: absolute; inset: 9% 16%; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.85); box-shadow: 0 0 0 1px rgba(0,0,0,0.25);
+  pointer-events: none;
+}
+.crop-zoom { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 340px; margin-top: 14px; }
+.crop-zoom input[type="range"] { flex: 1; height: 44px; accent-color: var(--fg); }
+.crop-zoom-label { font-size: 22px; font-weight: 700; color: var(--muted); width: 16px; text-align: center; }
+.crop-hint { text-align: center; }
+.crop-actions { display: flex; justify-content: space-between; gap: 8px; width: 100%; max-width: 340px; margin-top: 14px; }
+
+/* ---------- install tip ---------- */
+.install-tip { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-2); }
+.install-tip-toggle {
+  appearance: none; border: 0; background: transparent; cursor: pointer; font-family: inherit;
+  padding: 6px 0; color: var(--fg); font-size: 14px; font-weight: 600; text-decoration: underline;
+  min-height: 44px;
+}
+.install-steps { margin: 6px 0 0; padding-left: 20px; font-size: 14px; color: var(--fg); }
+.install-steps li { margin-bottom: 6px; }
