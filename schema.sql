@@ -281,6 +281,11 @@ alter table games add column if not exists code_version int not null default 1;
 create unique index if not exists idx_games_staff_code on games(staff_code_hash) where staff_code_hash is not null;
 create unique index if not exists idx_games_admin_code on games(admin_code_hash) where admin_code_hash is not null;
 
+-- A photo game must always be passcode-protected.
+alter table games drop constraint if exists games_faces_protected;
+alter table games add constraint games_faces_protected
+  check (kind <> 'faces' or (staff_code_hash is not null and admin_code_hash is not null));
+
 -- Name-based identity for passcode sign-in: '<game id>:<first>|<last>', lowercased.
 alter table users add column if not exists login_key text;
 create unique index if not exists idx_users_login_key on users(login_key) where login_key is not null;

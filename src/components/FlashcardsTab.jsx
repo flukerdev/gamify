@@ -20,7 +20,7 @@ export default function FlashcardsTab({ game, pairs, onGoLearn }) {
   const idsKey = cards.map(c => c.id).join(',');
   const byId = useMemo(() => new Map(cards.map(c => [c.id, c])), [cards]);
 
-  const [queue, setQueue] = useState([]);
+  const [queue, setQueue] = useState(() => shuffled(cards.map(c => c.id)));
   const [flipped, setFlipped] = useState(false);
   const [seen, setSeen] = useState(0);          // cards answered at least once
   const [firstTry, setFirstTry] = useState(0);  // known the first time shown
@@ -33,8 +33,13 @@ export default function FlashcardsTab({ game, pairs, onGoLearn }) {
     setFlipped(false); setSeen(0); setFirstTry(0); setMissedIds(new Set());
     setCardKey(k => k + 1);
   }
-  // (Re)deal whenever the set of students changes, e.g. the admin adds one.
-  useEffect(() => { start(); }, [idsKey]);
+  // Re-deal whenever the set of students changes, e.g. the admin adds one.
+  const dealtFor = useRef(idsKey);
+  useEffect(() => {
+    if (dealtFor.current === idsKey) return;
+    dealtFor.current = idsKey;
+    start();
+  }, [idsKey]);
 
   if (cards.length === 0) {
     return (
@@ -49,9 +54,12 @@ export default function FlashcardsTab({ game, pairs, onGoLearn }) {
   }
 
   const total = cards.length;
-  const currentId = queue[0];
+  // Ignore ids that are no longer students (one was just removed), so a
+  // stale queue can never point at a card that does not exist.
+  const live = queue.filter(id => byId.has(id));
+  const currentId = live[0];
   const current = currentId ? byId.get(currentId) : null;
-  const done = queue.length === 0;
+  const done = live.length === 0;
 
   function answer(knewIt) {
     if (!current) return;
@@ -65,11 +73,11 @@ export default function FlashcardsTab({ game, pairs, onGoLearn }) {
       if (knewIt) setFirstTry(n => n + 1);
     }
     if (knewIt) {
-      setQueue(q => q.slice(1));
+      setQueue(q => q.filter(id => id !== currentId));
     } else {
       setMissedIds(prev => new Set(prev).add(currentId));
-      // Back of the line, but never straight back if other cards remain.
-      setQueue(q => (q.length > 1 ? [...q.slice(1), q[0]] : q));
+      // To the back of the line; it comes around again after the others.
+      setQueue(q => [...q.filter(id => id !== currentId), currentId]);
     }
     setFlipped(false);
     setCardKey(k => k + 1);
@@ -105,10 +113,10 @@ export default function FlashcardsTab({ game, pairs, onGoLearn }) {
     <div className="tab-pad flash-pad">
       <h1 className="tab-title">Flashcards</h1>
       <div className="qt-progress">
-        {reviewing ? `Reviewing missed cards · ${queue.length} left` : `Card ${position} of ${total}`}
+        {reviewing ? `Reviewing missed cards · ${live.length} left` : `Card ${position} of ${total}`}
       </div>
       <div className="qt-bar">
-        <div className="qt-bar-fill" style={{ width: `${((total - queue.length) / total) * 100}%` }} />
+        <div className="qt-bar-fill" style={{ width: `${(Math.max(0, total - live.length) / total) * 100}%` }} />
       </div>
 
       <button

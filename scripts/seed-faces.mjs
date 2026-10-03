@@ -19,7 +19,7 @@ dotenv.config({ path: '.env.local', override: true });
 
 const { supabase, assertEnv } = await import('../api/_lib/supabase.js');
 const { hashPasscode, normalizePasscode } = await import('../api/_lib/session.js');
-const { genShareCode } = await import('../api/_lib/util.js');
+import crypto from 'node:crypto';
 
 const dir = process.argv[2];
 if (!dir) { console.error('usage: node scripts/seed-faces.mjs <dir>'); process.exit(1); }
@@ -29,8 +29,8 @@ const die = (label, error) => { console.error(`FAILED ${label}:`, error?.message
 
 const staffHash = hashPasscode(roster.staffPasscode);
 const adminHash = hashPasscode(roster.adminPasscode);
-if (normalizePasscode(roster.staffPasscode).length < 4) die('roster', 'staffPasscode needs at least 4 characters');
-if (normalizePasscode(roster.adminPasscode).length < 6) die('roster', 'adminPasscode needs at least 6 characters');
+if (normalizePasscode(roster.staffPasscode).length < 8) die('roster', 'staffPasscode needs at least 8 characters');
+if (normalizePasscode(roster.adminPasscode).length < 10) die('roster', 'adminPasscode needs at least 10 characters');
 if (staffHash === adminHash) die('roster', 'staff and admin passcodes must differ');
 
 // 1. The game (found by title among faces games, else created).
@@ -45,7 +45,11 @@ if (!game) {
     .select('*').single();
   if (oErr) die('create owner', oErr);
   const { data: created, error: cErr } = await supabase.from('games').insert({
-    title: roster.title, admin_user_id: owner.id, share_code: genShareCode(),
+    // share_code is required and unique, but a protected game is never joined
+    // by it. A long lowercase value can never equal a typed code (those are
+    // upper-cased before lookup) and cannot be guessed.
+    title: roster.title, admin_user_id: owner.id,
+    share_code: `protected-${crypto.randomBytes(24).toString('hex')}`,
     direction: 'term', kind: 'faces',
     staff_code_hash: staffHash, admin_code_hash: adminHash,
   }).select('*').single();
@@ -67,6 +71,7 @@ for (const s of roster.students) {
   if (have.has(s.name.toLowerCase())) { skipped++; continue; }
   const buf = fs.readFileSync(path.join(dir, s.file));
   if (buf[0] !== 0xff || buf[1] !== 0xd8) die(s.file, 'not a JPEG');
+  if (buf.length > 300 * 1024) die(s.file, 'larger than 300KB; crop and resize it first');
   const { data: pair, error: pErr } = await supabase.from('pairs').insert({
     game_id: game.id, term: '(photo)', definition: s.name, sort_order: ++order, photo_version: 1,
   }).select('id').single();

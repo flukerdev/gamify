@@ -312,10 +312,10 @@ function PasscodeSection({ game, onNotice }) {
       </p>
       <label className="field-label" htmlFor="pc-staff">New staff passcode</label>
       <input id="pc-staff" className="text-input" value={staff} onChange={e => { setStaff(e.target.value); setConfirm(false); }}
-        autoCapitalize="none" autoCorrect="off" autoComplete="off" spellCheck={false} placeholder="At least 4 characters" />
+        autoCapitalize="none" autoCorrect="off" autoComplete="off" spellCheck={false} placeholder="At least 8 characters" />
       <label className="field-label" htmlFor="pc-admin">New admin passcode</label>
       <input id="pc-admin" className="text-input" value={admin} onChange={e => { setAdmin(e.target.value); setConfirm(false); }}
-        autoCapitalize="none" autoCorrect="off" autoComplete="off" spellCheck={false} placeholder="At least 6 characters" />
+        autoCapitalize="none" autoCorrect="off" autoComplete="off" spellCheck={false} placeholder="At least 10 characters" />
       {err ? <div className="form-error" role="alert">{err}</div> : null}
       {confirm ? (
         <div className="danger-zone open">

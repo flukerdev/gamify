@@ -94,13 +94,32 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
         if (!landedRef.current) { landedRef.current = true; setTab('flashcards'); }
       }
       setGame(game); setPairs(pairs || []); setIsAdmin(isAdmin);
+      loadedRef.current = true;
+      lastLoadRef.current = Date.now();
     } catch (e) {
       // A dead session signs the person out (api.js); nothing to show here.
-      if (e.status !== 401) setErr(e.message);
+      // A failed REFRESH keeps showing what we already have; only a failed
+      // first load has nothing to fall back on.
+      if (e.status !== 401 && !loadedRef.current) setErr(e.message);
     }
   }
   const landedRef = useRef(false);
-  useEffect(() => { landedRef.current = false; loadGame(); }, [gameId]);
+  const loadedRef = useRef(false);
+  const lastLoadRef = useRef(0);
+  useEffect(() => { landedRef.current = false; loadedRef.current = false; loadGame(); }, [gameId]);
+
+  // An installed app stays open for days. Refresh the cards when the app
+  // comes back to the foreground or the person switches tabs, so students the
+  // admin added or re-photographed since show up (with their photos).
+  function refreshIfStale() {
+    if (loadedRef.current && Date.now() - lastLoadRef.current > 30000) loadGame();
+  }
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible') refreshIfStale(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [gameId]);
+  useEffect(() => { refreshIfStale(); }, [tab]);
 
   // The "X" inside LearnTab opens the same prompt. We expose openPrompt via
   // the same exitRef LearnTab fills. The X has no chosen destination, so

@@ -37,6 +37,7 @@ function authError(message = 'Please sign in again.') {
 
 async function requireUser(req) {
   if (req._user) return req._user;
+  assertEnv();
   const session = verifySession(req.header('x-session'));
   if (!session || !UUID_RE.test(session.u)) throw authError();
   const { data, error } = await supabase.from('users').select('*').eq('id', session.u).maybeSingle();
@@ -58,6 +59,8 @@ function publicGame(game) {
     staff_code_hash, admin_code_hash, code_version,
     last_notified_ranks, last_passed_notified, ...rest
   } = game;
+  // A protected game is never joined by share code, so nobody needs to see it.
+  if (staff_code_hash) delete rest.share_code;
   return { ...rest, protected: !!staff_code_hash };
 }
 const isProtected = (game) => !!game?.staff_code_hash;
@@ -71,7 +74,8 @@ const isProtected = (game) => !!game?.staff_code_hash;
 // passcode, never from a user id — names are not secret, the passcode is.
 app.use('/api/games/:id', async (req, res, next) => {
   const { id } = req.params;
-  if (id === 'join') return next();
+  // Only the join route itself skips the guard: not /api/games/join/anything.
+  if (id === 'join' && (req.path === '/' || req.path === '')) return next();
   try {
     if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Game not found.' });
     const user = await requireUser(req);
@@ -420,9 +424,15 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 // Per IP address. Generous because a whole staff may sign in from one office
 // network at the same meeting, and a few of them will mistype the passcode.
 const LOGIN_MAX_FAILS = 30;
+// Across every address, so spreading guesses over many IPs does not help.
+const LOGIN_MAX_FAILS_GLOBAL = 200;
 
+// On Vercel these headers are set by the platform and cannot be spoofed by
+// the caller. Elsewhere they can be, which the global cap above covers.
 function clientIp(req) {
-  const fwd = String(req.header('x-forwarded-for') || '').split(',')[0].trim();
+  const fwd = String(
+    req.header('x-vercel-forwarded-for') || req.header('x-real-ip') || req.header('x-forwarded-for') || '',
+  ).split(',')[0].trim();
   return (fwd || req.ip || 'unknown').slice(0, 64);
 }
 
@@ -467,7 +477,10 @@ app.post('/api/auth/passcode', async (req, res) => {
     const { count: fails, error: cErr } = await supabase.from('login_attempts')
       .select('*', { count: 'exact', head: true }).eq('ip', ip).gte('created_at', since);
     if (cErr) throw cErr;
-    if ((fails || 0) >= LOGIN_MAX_FAILS) {
+    const { count: allFails, error: aErr } = await supabase.from('login_attempts')
+      .select('*', { count: 'exact', head: true }).gte('created_at', since);
+    if (aErr) throw aErr;
+    if ((fails || 0) >= LOGIN_MAX_FAILS || (allFails || 0) >= LOGIN_MAX_FAILS_GLOBAL) {
       return res.status(429).json({ error: 'Too many tries. Wait 15 minutes and try again.' });
     }
 
@@ -749,10 +762,12 @@ app.post('/api/me/delete', async (req, res) => {
 // because targeting is recomputed from current DB state every invocation.
 // ===========================================================================
 
-// Vercel Cron Jobs send a GET request with `x-vercel-cron: 1`. For manual
+// Callers (the GitHub Actions schedules, or a manual curl) authenticate with
+// `Authorization: Bearer $CRON_SECRET`. For manual
 // testing or local dev, accept `Authorization: Bearer $CRON_SECRET` instead.
 function requireCron(req) {
-  if (req.header('x-vercel-cron')) return;
+  // Bearer secret only. (An `x-vercel-cron` header used to be accepted on its
+  // own, but any caller can send that header.)
   const expected = process.env.CRON_SECRET ? `Bearer ${process.env.CRON_SECRET}` : null;
   if (expected && req.header('authorization') === expected) return;
   const e = new Error('Cron auth required'); e.status = 401; throw e;
@@ -1008,7 +1023,8 @@ app.get('/api/me/games', async (req, res) => {
     // A passcode session is scoped to its one game. Other protected games are
     // never listed (each needs its own passcode sign-in).
     const s = req.session || {};
-    const visible = (games || []).filter(g => !isProtected(g) || s.g === g.id);
+    const visible = (games || []).filter(g =>
+      !isProtected(g) || (s.g === g.id && s.cv === g.code_version));
     res.json({ games: visible.map(publicGame) });
   } catch (e) { sendError(res, e); }
 });
@@ -1343,6 +1359,10 @@ app.put('/api/games/:id/pairs', async (req, res) => {
 // ===========================================================================
 
 const FACE_TERM = '(photo)';
+const REMOVED_NAME = '(removed)';
+// The staff passcode is the only thing between the internet and the photos.
+const MIN_STAFF_PASSCODE = 8;
+const MIN_ADMIN_PASSCODE = 10;
 const MAX_PHOTO_BYTES = 300 * 1024;
 
 // Accepts a JPEG data URL (what the in-app cropper produces) and returns bare
@@ -1386,6 +1406,9 @@ app.get('/api/games/:id/photos/:pairId', async (req, res) => {
     if (!data) return res.status(404).json({ error: 'No photo.' });
     res.set('Content-Type', 'image/jpeg');
     res.set('Cache-Control', 'private, max-age=31536000, immutable');
+    // Cached per session token: a signed-out browser cannot replay the URL
+    // from its disk cache, it has to ask the server (and gets a 401).
+    res.set('Vary', 'X-Session');
     res.send(Buffer.from(data.data, 'base64'));
   } catch (e) { sendError(res, e); }
 });
@@ -1473,11 +1496,17 @@ app.delete('/api/games/:id/students/:pairId', async (req, res) => {
       `remove student ${pairId}`,
       1,
       supabase.from('pairs')
-        .update({ deleted_at: new Date().toISOString(), photo_version: null })
+        .update({ deleted_at: new Date().toISOString(), photo_version: null, definition: REMOVED_NAME })
         .eq('id', pairId).select('id'),
     );
     const { error: phErr } = await supabase.from('pair_photos').delete().eq('pair_id', pairId);
     if (phErr) throw phErr;
+    // Past days' frozen question sets are never read again and still carry
+    // the name as an answer option, so they go too (today's is dropped by
+    // applyPairChanges).
+    const { error: qsErr } = await supabase.from('daily_question_sets').delete()
+      .eq('game_id', id).lt('date_et', easternDateString());
+    if (qsErr) throw qsErr;
     await applyPairChanges(id, { deletedIds: new Set([pairId]) });
     res.json({ ok: true });
   } catch (e) { sendError(res, e); }
@@ -1496,8 +1525,12 @@ app.put('/api/games/:id/passcodes', async (req, res) => {
     const staff = normalizePasscode(req.body?.staffPasscode);
     const admin = normalizePasscode(req.body?.adminPasscode);
     if (!staff && !admin) return res.status(400).json({ error: 'Enter a new passcode.' });
-    if (staff && staff.length < 4) return res.status(400).json({ error: 'The staff passcode needs at least 4 characters.' });
-    if (admin && admin.length < 6) return res.status(400).json({ error: 'The admin passcode needs at least 6 characters.' });
+    if (staff && staff.length < MIN_STAFF_PASSCODE) {
+      return res.status(400).json({ error: `The staff passcode needs at least ${MIN_STAFF_PASSCODE} characters.` });
+    }
+    if (admin && admin.length < MIN_ADMIN_PASSCODE) {
+      return res.status(400).json({ error: `The admin passcode needs at least ${MIN_ADMIN_PASSCODE} characters.` });
+    }
 
     const staffHash = staff ? hashPasscode(staff) : game.staff_code_hash;
     const adminHash = admin ? hashPasscode(admin) : game.admin_code_hash;
@@ -1780,6 +1813,13 @@ async function quizOrTestSubmit(req, res, kind) {
   const questions = await getOrCreateDailyQuestions(id, kind, dateEt, length, direction);
   if (!questions) return res.status(400).json({ error: 'Not enough content.' });
   const submitted = Array.isArray(req.body?.answers) ? req.body.answers : [];
+  // Answers are graded by position, so they must be for THIS set. If the
+  // admin edited the cards mid-attempt the set was rebuilt; ask the client to
+  // start over instead of grading against different questions.
+  const seen = Array.isArray(req.body?.pairIds) ? req.body.pairIds : null;
+  if (seen && (seen.length !== questions.length || questions.some((q, i) => q.pairId !== seen[i]))) {
+    return res.status(409).json({ error: 'The questions were just updated. Please start again.', stale: true });
+  }
 
   let correct = 0;
   const graded = questions.map((q, i) => {

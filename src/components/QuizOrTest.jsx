@@ -134,12 +134,17 @@ export default function QuizOrTest({ game, kind, length, onGoToLeaderboard }) {
     setBusy(true);
     setErr('');
     try {
-      const out = await api.post(`/api/games/${game.id}/${kind}`, { answers });
+      const out = await api.post(`/api/games/${game.id}/${kind}`, {
+        answers,
+        // Lets the server confirm these answers are for the set it will grade.
+        pairIds: questions.map(x => x.pairId),
+      });
       setResult(out.attempt);
       setJustEarnedPoints(Number(out.points || 0));
     } catch (e) {
       // Already taken (e.g. submitted from another phone): show that result.
       if (e.status === 409 && e.data?.attempt) setResult(e.data.attempt);
+      else if (e.status === 409 && e.data?.stale) { await load(); setErr(e.message); }
       else setErr(e.message);
     }
     setBusy(false);

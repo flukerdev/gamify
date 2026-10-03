@@ -23,6 +23,7 @@ function secret() {
 }
 
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
+const MAX_SESSION_AGE_MS = 180 * 24 * 60 * 60 * 1000;
 
 export function signSession(payload) {
   const body = b64u(JSON.stringify({ ...payload, iat: Date.now() }));
@@ -43,6 +44,8 @@ export function verifySession(token) {
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
     if (!payload || typeof payload.u !== 'string') return null;
+    // Sessions last half a year; after that the person signs in again.
+    if (typeof payload.iat !== 'number' || Date.now() - payload.iat > MAX_SESSION_AGE_MS) return null;
     return payload;
   } catch { return null; }
 }
@@ -69,7 +72,14 @@ export function cleanName(input) {
   }
   return s;
 }
-// Identity key for name-based sign-in within one game.
+// Identity key for name-based sign-in within one game. Phones disagree about
+// apostrophes and dashes (iOS types curly ones), so those are folded here:
+// "O’Neal" on an iPhone and "O'Neal" on Android are the same person.
+function keyPart(name) {
+  return cleanName(name).toLowerCase()
+    .replace(/[\u2018\u2019\u02bc`]/g, "'")
+    .replace(/[\u2010-\u2015]/g, '-');
+}
 export function loginKey(gameId, firstName, lastName) {
-  return `${gameId}:${cleanName(firstName).toLowerCase()}|${cleanName(lastName).toLowerCase()}`;
+  return `${gameId}:${keyPart(firstName)}|${keyPart(lastName)}`;
 }

@@ -6,9 +6,18 @@
 // own HTTP cache makes later page loads instant because the versioned URL is
 // served as immutable.
 import { api } from './api.js';
+import { getToken, onAuthChange } from './auth.js';
 
 const versions = new Map();   // pairId -> photo_version
 const urls = new Map();       // `${pairId}:${version}` -> Promise<objectURL>
+
+// Signing out drops every photo held in memory.
+onAuthChange(() => {
+  if (getToken()) return;
+  for (const p of urls.values()) p.then(u => URL.revokeObjectURL(u)).catch(() => {});
+  urls.clear();
+  versions.clear();
+});
 
 // GameShell calls this whenever it (re)loads the game's cards.
 export function setPhotoVersions(pairs) {

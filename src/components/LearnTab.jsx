@@ -62,6 +62,8 @@ export default function LearnTab({ game, onExit, onActiveChange, onProgressChang
       setState(r.state); setNextCard(r.nextCard); setBuckets(r.buckets);
       setSecondsRemaining(r.secondsRemaining);
       setProgressSegs(makeFreshSegs(r.state));
+      // A (re)load always starts on a clean card: nothing typed, nothing graded.
+      setGraded(null); setTioInput(''); setAnimKey(k => k + 1);
       if (!r.nextCard) setPhase('complete');
       else setPhase('answering');
     } catch (e) {

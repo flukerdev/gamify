@@ -10,7 +10,9 @@ const MAX_BYTES = 280 * 1024;
 
 export default function PhotoCropper({ source, onCancel, onDone }) {
   const frameRef = useRef(null);
-  const imgRef = useRef(null);
+  const loadedRef = useRef(null);
+  const centeredFor = useRef(null);
+  const lastFrame = useRef(0);
   const pointers = useRef(new Map());
   const pinch = useRef(null);
   const [img, setImg] = useState(null);       // { url, w, h, revoke }
@@ -28,6 +30,9 @@ export default function PhotoCropper({ source, onCancel, onDone }) {
     el.onload = () => {
       if (cancelled) return;
       if (!el.naturalWidth || !el.naturalHeight) { setErr('That photo could not be opened. Try a different one.'); return; }
+      // Keep the decoded image itself: the export draws from it, not from the
+      // on-screen <img> (which may not have decoded yet).
+      loadedRef.current = el;
       setImg({ url, w: el.naturalWidth, h: el.naturalHeight });
     };
     el.onerror = () => { if (!cancelled) setErr('That photo could not be opened. Try a different one.'); };
@@ -60,11 +65,19 @@ export default function PhotoCropper({ source, onCancel, onDone }) {
     return { zoom: z, x: Math.min(0, Math.max(minX, v.x)), y: Math.min(0, Math.max(minY, v.y)) };
   }
 
-  // Center the image whenever a new image or frame size arrives.
+  // Center a new image once. If only the frame changes size afterwards (the
+  // phone rotates), keep the same crop by scaling the offsets with it.
   useEffect(() => {
     if (!img || !frame) return;
-    const s = frame / Math.min(img.w, img.h);
-    setView({ zoom: 1, x: (frame - img.w * s) / 2, y: (frame - img.h * s) / 2 });
+    if (centeredFor.current !== img) {
+      centeredFor.current = img;
+      const s = frame / Math.min(img.w, img.h);
+      setView({ zoom: 1, x: (frame - img.w * s) / 2, y: (frame - img.h * s) / 2 });
+    } else if (lastFrame.current && lastFrame.current !== frame) {
+      const k = frame / lastFrame.current;
+      setView(v => clamp({ ...v, x: v.x * k, y: v.y * k }));
+    }
+    lastFrame.current = frame;
   }, [img, frame]);
 
   // Zoom keeping the point (px, py) of the frame fixed under the finger.
@@ -132,7 +145,7 @@ export default function PhotoCropper({ source, onCancel, onDone }) {
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
       const side = frame / scale;               // crop size in image pixels
-      ctx.drawImage(imgRef.current, -view.x / scale, -view.y / scale, side, side, 0, 0, OUT, OUT);
+      ctx.drawImage(loadedRef.current, -view.x / scale, -view.y / scale, side, side, 0, 0, OUT, OUT);
       let quality = 0.86;
       let out = canvas.toDataURL('image/jpeg', quality);
       // base64 is ~4/3 the byte size; step quality down if a busy photo runs large.
@@ -157,10 +170,10 @@ export default function PhotoCropper({ source, onCancel, onDone }) {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onLostPointerCapture={onPointerUp}
         onWheel={onWheel}>
         {img ? (
           <img
-            ref={imgRef}
             src={img.url}
             alt=""
             draggable={false}

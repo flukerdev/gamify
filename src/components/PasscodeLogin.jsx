@@ -29,6 +29,15 @@ export default function PasscodeLogin({ onSignedIn }) {
     }
   }
 
+  // The keyboard's Next key should move down the form, not submit it early.
+  function nextOnEnter(nextId) {
+    return (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      document.getElementById(nextId)?.focus();
+    };
+  }
+
   return (
     <div className="auth-wrap">
       <div className="auth-card">
@@ -42,12 +51,12 @@ export default function PasscodeLogin({ onSignedIn }) {
           <input id="pl-code" className="text-input" value={passcode}
             onChange={(e) => setPasscode(e.target.value)}
             autoCapitalize="none" autoCorrect="off" autoComplete="off" spellCheck={false}
-            enterKeyHint="next" />
+            enterKeyHint="next" onKeyDown={nextOnEnter('pl-first')} />
           <label className="field-label" htmlFor="pl-first">First name</label>
           <input id="pl-first" className="text-input" value={firstName}
             onChange={(e) => setFirst(e.target.value)}
             autoCapitalize="words" autoCorrect="off" autoComplete="given-name" spellCheck={false}
-            enterKeyHint="next" maxLength={40} />
+            enterKeyHint="next" maxLength={40} onKeyDown={nextOnEnter('pl-last')} />
           <label className="field-label" htmlFor="pl-last">Last name</label>
           <input id="pl-last" className="text-input" value={lastName}
             onChange={(e) => setLast(e.target.value)}
