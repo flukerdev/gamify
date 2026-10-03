@@ -7,15 +7,16 @@ A competitive learning platform. An admin creates a "game" with term/definition 
 - **Frontend:** React + Vite
 - **Backend:** Express, deployed as a Vercel serverless function
 - **Database:** Supabase (Postgres) — used for data only; no Supabase Auth. RLS is ENABLED on every table with no policies, so only the service-role key (the API) can read or write.
-- **Auth:** signed session tokens. Photo games sign in by invite link + your name; classic games keep phone-number sign-in at `/?legacy=1`.
+- **Auth:** signed session tokens. Photo games sign in with just your name (plus a PIN for the admin); classic games keep phone-number sign-in at `/?legacy=1`.
 
 ## Photo games (STS - Know your Names!)
 
 - `games.kind = 'faces'`. The name is `pairs.definition`; `pairs.term` is the placeholder `(photo)`; direction is always `term` (show the photo, recall the name), so Learn / Quiz / Test run unchanged.
 - **Photos are private.** Each is a 512px JPEG stored base64 in `pair_photos` and served only by `GET /api/games/:id/photos/:pairId` to signed-in members. They are never in the repo (which is public) and never in public storage.
-- **Entry is by link, not by typing a passcode.** A photo game is *protected* (`staff_code_hash` set). The staff invite link is `/?k=<games.share_code>`; opening it asks only for your name, once (`POST /api/auth/passcode`). The name is the identity (same name on a new phone = same person). After sign-in the address becomes `/?k=<code>&n=<name>`, so an iPhone home-screen icon made from it signs in with no typing (there is deliberately no web manifest, so "Add to Home Screen" uses the current address). A separate **admin link** (`/?k=<admin code>`, stored only as a hash) also opens the Manage screen. Anyone holding a link can get in; "Make new links" in Manage replaces both codes, bumps `code_version` and signs every device out. Bad codes are throttled per IP.
-- **Tabs:** Flashcards (tap to flip, unscored), Learn, Daily Quiz, Daily Test, Leaderboard, My Progress, Invite (the staff link, with Copy and Share).
-- **Manage** (admin passcode only, in the menu): add a student (choose photo, drag / pinch / slider to crop, type the name), edit or re-crop, remove (deletes the photo for good), remove a person from the leaderboard, copy the staff link or make new links.
+- **Sign-in is just your name.** Open the app, type your name once, tap Start (`POST /api/auth/passcode` with no passcode joins the deployment's one photo game). The name is the identity (same name on a new phone = same person). After sign-in the address becomes `/?n=<name>`, so an iPhone home-screen icon made from it signs in with no typing (there is deliberately no web manifest, so "Add to Home Screen" uses the current address). **Anyone who can open the address can get in**; that is a deliberate choice for a small staff app.
+- **Admin is a PIN.** "I am the admin" on the sign-in screen, or "Admin" in the menu once signed in, takes the admin PIN (stored only as `admin_code_hash`) and opens the Manage screen on that phone from then on (the admin's address also carries `&k=<pin>`). Wrong PINs are throttled per IP. The PIN is changed in Manage.
+- **Tabs:** Flashcards (tap to flip, unscored), Learn, Daily Quiz, Daily Test, Leaderboard, My Progress, Invite (the app's address, with Copy and Share).
+- **Manage** (admin passcode only, in the menu): add a student (choose photo, drag / pinch / slider to crop, type the name), edit or re-crop, remove (deletes the photo for good), remove a person from the leaderboard, change the admin PIN.
 - **Seeding:** `node scripts/seed-faces.mjs <dir>` creates the game and loads a folder of face crops (see the header of that file). Keep the folder outside the repo.
 - **Install:** PNG touch icon plus Apple web-app meta tags; staff add it to their home screen from Safari (Share, Add to Home Screen) or Chrome (menu, Add to Home screen).
 

@@ -3,16 +3,15 @@ import { api } from '../api.js';
 import { loadPhoto } from '../photos.js';
 import FacePhoto from './FacePhoto.jsx';
 import PhotoCropper from './PhotoCropper.jsx';
-import InviteFriends from './InviteFriends.jsx';
-import { rememberLink, memberLink } from '../link.js';
+import { rememberLink } from '../link.js';
 
 // Admin-only manager for a photo game. Three things live here:
 //   Students   add, rename, re-crop / replace the photo, remove
 //   People     take someone off the leaderboard
-//   Links      the staff invite link, and making new links if one gets out
+//   Admin PIN  change the PIN that opens this screen
 // Every change saves on its own and applies to everyone right away.
 export default function ManageStudents({ game, pairs, user, onChanged, onClose }) {
-  const [section, setSection] = useState('students'); // students | people | links
+  const [section, setSection] = useState('students'); // students | people | pin
   const [editing, setEditing] = useState(null);       // null | { id, name } (id null = new)
   const [notice, setNotice] = useState('');
 
@@ -39,7 +38,7 @@ export default function ManageStudents({ game, pairs, user, onChanged, onClose }
   return (
     <Sheet title="Manage" onClose={onClose} closeLabel="Close">
       <div className="seg" role="tablist">
-        {[['students', 'Students'], ['people', 'Staff'], ['links', 'Links']].map(([id, label]) => (
+        {[['students', 'Students'], ['people', 'Staff'], ['pin', 'Admin PIN']].map(([id, label]) => (
           <button key={id} role="tab" aria-selected={section === id}
             className={`seg-btn ${section === id ? 'on' : ''}`} onClick={() => { setSection(id); setNotice(''); }}>
             {label}
@@ -68,7 +67,7 @@ export default function ManageStudents({ game, pairs, user, onChanged, onClose }
         </>
       )}
       {section === 'people' && <PeopleSection game={game} user={user} onNotice={flash} />}
-      {section === 'links' && <LinksSection game={game} user={user} onChanged={onChanged} onNotice={flash} />}
+      {section === 'pin' && <PinSection game={game} user={user} onNotice={flash} />}
     </Sheet>
   );
 }
@@ -278,69 +277,42 @@ function PeopleSection({ game, user, onNotice }) {
   );
 }
 
-// --------------------------------------------------------------------- links
+// ----------------------------------------------------------------------- pin
 
-function LinksSection({ game, user, onChanged, onNotice }) {
-  const [confirm, setConfirm] = useState(false);
+function PinSection({ game, user, onNotice }) {
+  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [adminLink, setAdminLink] = useState('');
-  const [copied, setCopied] = useState(false);
 
-  async function reset() {
+  async function save(e) {
+    e.preventDefault();
     if (busy) return;
+    const clean = pin.trim();
+    if (clean.length < 4) { setErr('Use at least 4 numbers.'); return; }
     setBusy(true); setErr('');
     try {
-      const out = await api.post(`/api/games/${game.id}/links/reset`, {});
-      // This phone keeps working: remember the new admin link right away.
-      rememberLink(out.adminCode, `${user.first_name}${user.last_name ? ` ${user.last_name}` : ''}`);
-      setAdminLink(memberLink(out.adminCode));
-      setConfirm(false);
-      await onChanged();
-      onNotice('New links are ready.');
-    } catch (e) { setErr(e.message || 'Could not reset. Try again.'); setConfirm(false); }
+      await api.put(`/api/games/${game.id}/pin`, { pin: clean });
+      // Keep this phone's saved PIN in step so it stays an admin phone.
+      rememberLink(clean, `${user.first_name}${user.last_name ? ` ${user.last_name}` : ''}`);
+      setPin('');
+      onNotice('Admin PIN changed.');
+    } catch (e2) { setErr(e2.message || 'Could not save. Try again.'); }
     setBusy(false);
-  }
-  async function copyAdmin() {
-    try { await navigator.clipboard.writeText(adminLink); setCopied(true); setTimeout(() => setCopied(false), 1600); }
-    catch { /* they can still select the text */ }
   }
 
   return (
-    <>
-      <p className="hub-sub">Send the staff link to anyone who should play. They tap it and type their name. That is all.</p>
-      <InviteFriends game={game} compact />
-
-      {adminLink ? (
-        <div className="invite-card compact admin-link-card">
-          <h3 className="invite-title">Your new admin link</h3>
-          <p className="hint">Save this now. It is the only link that opens Manage, and it is not shown again.</p>
-          <div className="invite-link-row">
-            <input className="text-input invite-link-input" readOnly value={adminLink} onFocus={(e) => e.target.select()} />
-            <button className="btn btn-primary" onClick={copyAdmin}>{copied ? 'Copied!' : 'Copy link'}</button>
-          </div>
-        </div>
-      ) : null}
-
+    <form onSubmit={save}>
+      <p className="hub-sub">
+        The admin PIN is what opens this Manage screen. Everyone else just types their name.
+      </p>
+      <label className="field-label" htmlFor="pin-new">New admin PIN</label>
+      <input id="pin-new" className="text-input" value={pin} onChange={(e) => { setPin(e.target.value); setErr(''); }}
+        inputMode="numeric" autoComplete="off" autoCorrect="off" spellCheck={false} maxLength={24}
+        placeholder="At least 4 numbers" />
       {err ? <div className="form-error" role="alert">{err}</div> : null}
-      <div className="danger-zone">
-        {confirm ? (
-          <>
-            <p className="danger-text">
-              Make new links? The old staff link and the old admin link stop working and everyone is signed out
-              until they open the new link. Points are kept. You stay signed in on this phone.
-            </p>
-            <div className="editor-actions">
-              <button className="btn btn-ghost" onClick={() => setConfirm(false)} disabled={busy}>Cancel</button>
-              <button className="btn btn-danger" onClick={reset} disabled={busy}>{busy ? 'Working…' : 'Make new links'}</button>
-            </div>
-          </>
-        ) : (
-          <button className="btn btn-ghost danger-link" onClick={() => setConfirm(true)}>
-            Link got out? Make new links
-          </button>
-        )}
+      <div className="editor-actions">
+        <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Change PIN'}</button>
       </div>
-    </>
+    </form>
   );
 }

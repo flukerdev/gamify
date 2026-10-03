@@ -12,6 +12,7 @@ import OnboardingTour from './OnboardingTour.jsx';
 import FlashcardsTab from './FlashcardsTab.jsx';
 import ManageStudents from './ManageStudents.jsx';
 import { setPhotoVersions, preloadPhotos } from '../photos.js';
+import { rememberLink } from '../link.js';
 import Loading from './Loading.jsx';
 
 const TABS = [
@@ -43,6 +44,7 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
   const [navOpen, setNavOpen] = useState(false);
   const [err, setErr] = useState('');
   const [showEditPairs, setShowEditPairs] = useState(false);
+  const [showAdminPin, setShowAdminPin] = useState(false);
 
   // First-run tour: shown until users.onboarded_at is set. Spotlight names the
   // target group: 'rank' (leaderboard row) or 'activities' (Quiz/Test/Learn tabs).
@@ -242,6 +244,11 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
               onClick={() => { setNavOpen(false); setShowEditPairs(true); }}>
               {isFaces ? 'Manage students' : 'Edit Pairs'}
             </button>
+          ) : game.protected ? (
+            <button className="btn btn-ghost small edit-pairs-btn"
+              onClick={() => { setNavOpen(false); setShowAdminPin(true); }}>
+              Admin
+            </button>
           ) : null}
           <div className="me-row">
             <div className="me-name">{user.first_name} {user.last_name}</div>
@@ -268,7 +275,7 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
           <div className="tab-pad">
             <h1 className="tab-title">{isFaces ? 'Invite' : 'Invite Friends'}</h1>
             <p className="hub-sub">{isFaces
-              ? 'Send this link to someone on staff. They tap it, type their name, and they are in.'
+              ? 'Send this link to someone on staff.'
               : 'Inviting friends is what makes Gamify fun.'}</p>
             <InviteFriends game={game} />
           </div>
@@ -280,6 +287,12 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
       )}
       {exitStage === 'points' && (
         <ExitPointsModal points={exitPoints} onClose={finishExitNav} />
+      )}
+
+      {showAdminPin && (
+        <AdminPinModal game={game} user={user}
+          onCancel={() => setShowAdminPin(false)}
+          onUnlocked={async () => { setShowAdminPin(false); await loadGame(); setShowEditPairs(true); }} />
       )}
 
       {showEditPairs && (isFaces
@@ -297,6 +310,42 @@ export default function GameShell({ user, gameId, onSwitchGame, onLogout }) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+// "Admin" in the menu: type the PIN once and this phone can manage students
+// from then on.
+function AdminPinModal({ game, user, onCancel, onUnlocked }) {
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    if (!pin.trim()) { setErr('Type the admin PIN.'); return; }
+    setBusy(true); setErr('');
+    try {
+      await api.post(`/api/games/${game.id}/admin`, { pin: pin.trim() });
+      rememberLink(pin.trim(), `${user.first_name}${user.last_name ? ` ${user.last_name}` : ''}`);
+      await onUnlocked();
+    } catch (e2) { setErr(e2.message || 'Could not check the PIN. Try again.'); setBusy(false); }
+  }
+  return (
+    <div className="modal-wrap">
+      <form className="modal small" onSubmit={submit}>
+        <div className="modal-head"><h3>Admin</h3></div>
+        <div className="modal-body">
+          <label className="field-label" htmlFor="ad-pin">Admin PIN</label>
+          <input id="ad-pin" className="text-input" value={pin} onChange={(e) => setPin(e.target.value)}
+            inputMode="numeric" autoComplete="off" autoCorrect="off" spellCheck={false} autoFocus maxLength={24} />
+          {err ? <div className="form-error" role="alert">{err}</div> : null}
+        </div>
+        <div className="modal-foot">
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Checking…' : 'Unlock'}</button>
+        </div>
+      </form>
     </div>
   );
 }

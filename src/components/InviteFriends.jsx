@@ -3,10 +3,10 @@ import { memberLink } from '../link.js';
 
 // Build the magic invite link. The route `/?invite=CODE` is read by App.jsx on
 // load and short-circuits the friend straight into the name+phone screen.
-// Photo games (protected) use /?k=CODE instead: tap it, type your name, in.
+// Photo games (protected) share the plain address: open it, type your name, in.
 export function buildInviteLink(gameOrCode) {
   const shareCode = typeof gameOrCode === 'string' ? gameOrCode : gameOrCode.share_code;
-  if (typeof gameOrCode !== 'string' && gameOrCode.protected) return memberLink(shareCode);
+  if (typeof gameOrCode !== 'string' && gameOrCode.protected) return memberLink();
   if (typeof window === 'undefined') return `/?invite=${shareCode}`;
   const u = new URL(window.location.origin);
   u.searchParams.set('invite', shareCode);
@@ -44,7 +44,7 @@ export default function InviteFriends({ game, compact = false }) {
 
   return (
     <div className={`invite-card ${compact ? 'compact' : ''}`}>
-      <h3 className="invite-title">{isFaces ? 'Invite link' : 'Invite friends'}</h3>
+      <h3 className="invite-title">{isFaces ? 'Share the app' : 'Invite friends'}</h3>
       <div className="invite-link-row">
         <input className="text-input invite-link-input" readOnly value={link}
           onFocus={(e) => e.target.select()} />
@@ -55,7 +55,7 @@ export default function InviteFriends({ game, compact = false }) {
       ) : null}
       {game.protected ? (
         <div className="invite-code-line">
-          Anyone with this link can get in, so only send it to people who should see the students.
+          They open the link and type their name. That is all.
         </div>
       ) : (
         <div className="invite-code-line">

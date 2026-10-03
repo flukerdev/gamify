@@ -32,8 +32,10 @@ roster.staffPasscode = process.env.STS_STAFF_PASSCODE || roster.staffPasscode;
 roster.adminPasscode = process.env.STS_ADMIN_PASSCODE || roster.adminPasscode;
 const staffHash = hashPasscode(roster.staffPasscode);
 const adminHash = hashPasscode(roster.adminPasscode);
+// adminPasscode is the admin PIN. staffPasscode is no longer typed by anyone
+// (sign-in is by name); it only fills the required staff_code_hash column.
 if (normalizePasscode(roster.staffPasscode).length < 8) die('roster', 'staffPasscode needs at least 8 characters');
-if (normalizePasscode(roster.adminPasscode).length < 10) die('roster', 'adminPasscode needs at least 10 characters');
+if (normalizePasscode(roster.adminPasscode).length < 4) die('roster', 'adminPasscode (the admin PIN) needs at least 4 characters');
 if (staffHash === adminHash) die('roster', 'staff and admin passcodes must differ');
 
 // 1. The game (found by title among faces games, else created).
@@ -48,10 +50,11 @@ if (!game) {
     .select('*').single();
   if (oErr) die('create owner', oErr);
   const { data: created, error: cErr } = await supabase.from('games').insert({
-    // share_code holds the staff link code (normalized), so the app can show
-    // members the invite link: /?k=<share_code>.
+    // share_code is required and unique but unused by photo games (people
+    // sign in with just their name). A lowercase value can never match the
+    // classic join-by-code route, which upper-cases what is typed.
     title: roster.title, admin_user_id: owner.id,
-    share_code: normalizePasscode(roster.staffPasscode),
+    share_code: `photo-${normalizePasscode(roster.staffPasscode)}`,
     direction: 'term', kind: 'faces',
     staff_code_hash: staffHash, admin_code_hash: adminHash,
   }).select('*').single();

@@ -1,14 +1,13 @@
-// Invite links for photo games: /?k=<code>&n=<name>.
+// How a phone remembers who it is, for the photo game.
 //
-//   k  the link code. The staff code lets you in; the admin code also opens
-//      the Manage screen. Nobody ever types it: it rides in the link.
-//   n  the person's name, added to the address after they sign in.
+// After someone signs in, the address becomes /?n=<their name> (plus
+// &k=<admin PIN> on the admin's own phone). On an iPhone, a web app added to
+// the home screen starts from the address it was added from and has its own
+// separate storage, so with the name in that address the home-screen app
+// signs the person in by itself. They type their name once, ever.
 //
-// Why the name goes in the address: on an iPhone, a web app added to the home
-// screen starts from the address it was added from and has its own separate
-// storage. With k and n in that address, the home-screen app signs the person
-// in by itself, so they type their name once, ever.
-const KEY = 'gamify.linkKey';
+// The link you SHARE is always the plain address with nothing after it.
+const PIN = 'gamify.adminPin';
 const NAME = 'gamify.linkName';
 const NO_AUTO = 'gamify.noAuto';
 
@@ -26,26 +25,27 @@ export function readLinkFromUrl() {
   } catch { return { k: '', n: '' }; }
 }
 export function storedLink() {
-  return { k: get(KEY) || '', n: get(NAME) || '' };
+  return { k: get(PIN) || '', n: get(NAME) || '' };
 }
 
-// Remember the working link on this device and put it in the address bar.
-export function rememberLink(k, name) {
-  if (k) set(KEY, k);
+// Remember this person (and the admin PIN, if they used one) on this device,
+// and reflect it in the address bar. Pass pin = '' to forget a stored PIN.
+export function rememberLink(pin, name) {
+  if (pin != null) set(PIN, pin || null);
   if (name) set(NAME, name);
   set(NO_AUTO, null);
   syncLinkToUrl();
 }
 export function syncLinkToUrl() {
   const { k, n } = storedLink();
-  if (!k) return;
+  if (!n) return;
   try {
     const u = new URL(window.location.href);
-    if (u.searchParams.get('k') === k && (u.searchParams.get('n') || '') === n) return;
-    u.searchParams.set('k', k);
-    if (n) u.searchParams.set('n', n); else u.searchParams.delete('n');
+    if ((u.searchParams.get('n') || '') === n && (u.searchParams.get('k') || '') === k) return;
+    u.searchParams.set('n', n);
+    if (k) u.searchParams.set('k', k); else u.searchParams.delete('k');
     window.history.replaceState({}, '', u.toString());
-  } catch { /* address bar is a nicety, never a requirement */ }
+  } catch { /* the address bar is a nicety, never a requirement */ }
 }
 
 // After an explicit "Log out" the app must not sign straight back in from
@@ -53,20 +53,8 @@ export function syncLinkToUrl() {
 export function setNoAuto() { set(NO_AUTO, '1'); }
 export function autoAllowed() { return get(NO_AUTO) !== '1'; }
 
-// Accepts a pasted invite link or a bare code.
-export function codeFromInput(text) {
-  const t = String(text || '').trim();
-  try {
-    const k = new URL(t).searchParams.get('k');
-    if (k) return k.trim();
-  } catch { /* not a URL */ }
-  const m = /[?&]k=([^&\s]+)/.exec(t);
-  return m ? decodeURIComponent(m[1]) : t;
-}
-
-export function memberLink(code) {
-  if (typeof window === 'undefined') return `/?k=${code}`;
-  const u = new URL(window.location.origin);
-  u.searchParams.set('k', code);
-  return u.toString();
+// The link to share: the plain address.
+export function memberLink() {
+  if (typeof window === 'undefined') return '/';
+  return `${window.location.origin}/`;
 }

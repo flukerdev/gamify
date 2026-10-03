@@ -1,7 +1,6 @@
 // Gamify API — single Express app exported as a Vercel serverless function.
 // Local dev: imported by server-local.js and bound to a port.
 
-import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import { OAuth2Client } from 'google-auth-library';
@@ -457,46 +456,65 @@ async function findOrCreateUserByName(gameId, firstName, lastName) {
   return again;
 }
 
-// POST /api/auth/passcode  body: { passcode, firstName, lastName }
-// The passcode picks the game: the shared staff passcode signs you in as a
-// player, the admin passcode signs you in as a player who can also manage
-// the cards. Your name is how the leaderboard knows you; type the same name
-// on a new phone and you pick up where you left off.
+// Throttle for wrong admin PINs. Returns true (and answers 429) when this
+// address, or everyone together, has guessed too often in the window.
+async function tooManyFailures(req, res) {
+  const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
+  const ip = clientIp(req);
+  const { count: fails, error: cErr } = await supabase.from('login_attempts')
+    .select('*', { count: 'exact', head: true }).eq('ip', ip).gte('created_at', since);
+  if (cErr) throw cErr;
+  const { count: allFails, error: aErr } = await supabase.from('login_attempts')
+    .select('*', { count: 'exact', head: true }).gte('created_at', since);
+  if (aErr) throw aErr;
+  if ((fails || 0) >= LOGIN_MAX_FAILS || (allFails || 0) >= LOGIN_MAX_FAILS_GLOBAL) {
+    res.status(429).json({ error: 'Too many tries. Wait 15 minutes and try again.' });
+    return true;
+  }
+  return false;
+}
+async function recordFailure(req) {
+  await supabase.from('login_attempts').insert({ ip: clientIp(req) });
+  // Keep the table small: old failures no longer count toward anything.
+  await supabase.from('login_attempts').delete()
+    .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+}
+
+// The photo game this deployment serves (there is one).
+async function findPhotoGame() {
+  const { data, error } = await supabase.from('games').select('*')
+    .eq('kind', 'faces').order('created_at', { ascending: true }).limit(1);
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
+// POST /api/auth/passcode  body: { firstName, lastName?, passcode? }
+// Sign-in for the photo game is just your name: open the app, type it once,
+// and you are in. The name is how the leaderboard knows you; the same name on
+// a new phone picks up where you left off.
+// `passcode` is optional and is the ADMIN PIN: with the right PIN the session
+// can also manage the cards. A wrong PIN is refused (and throttled).
 app.post('/api/auth/passcode', async (req, res) => {
   try {
     assertEnv();
-    const passcode  = normalizePasscode(req.body?.passcode);
+    const pin       = normalizePasscode(req.body?.passcode);
     const firstName = cleanName(req.body?.firstName);
     const lastName  = cleanName(req.body?.lastName);
-    if (!passcode)  return res.status(400).json({ error: 'Open the link you were sent to get in.' });
     // Only a first name is required; a last name just tells two Sams apart.
-    if (!firstName) return res.status(400).json({ error: 'Enter your name.' });
+    if (!firstName) return res.status(400).json({ error: 'Type your name.' });
 
-    const ip = clientIp(req);
-    const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
-    const { count: fails, error: cErr } = await supabase.from('login_attempts')
-      .select('*', { count: 'exact', head: true }).eq('ip', ip).gte('created_at', since);
-    if (cErr) throw cErr;
-    const { count: allFails, error: aErr } = await supabase.from('login_attempts')
-      .select('*', { count: 'exact', head: true }).gte('created_at', since);
-    if (aErr) throw aErr;
-    if ((fails || 0) >= LOGIN_MAX_FAILS || (allFails || 0) >= LOGIN_MAX_FAILS_GLOBAL) {
-      return res.status(429).json({ error: 'Too many tries. Wait 15 minutes and try again.' });
-    }
+    const game = await findPhotoGame();
+    if (!game) return res.status(404).json({ error: 'This app is not set up yet.' });
 
-    const hash = hashPasscode(passcode);
-    const { data: games, error: gErr } = await supabase.from('games').select('*')
-      .or(`staff_code_hash.eq.${hash},admin_code_hash.eq.${hash}`).limit(1);
-    if (gErr) throw gErr;
-    const game = games?.[0];
-    if (!game) {
-      await supabase.from('login_attempts').insert({ ip });
-      // Keep the table small: old failures no longer count toward anything.
-      await supabase.from('login_attempts').delete()
-        .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-      return res.status(401).json({ error: 'That link is no longer valid. Ask for the new one.' });
+    let asAdmin = false;
+    if (pin) {
+      if (await tooManyFailures(req, res)) return;
+      if (hashPasscode(pin) !== game.admin_code_hash) {
+        await recordFailure(req);
+        return res.status(401).json({ error: 'That admin PIN is not right.' });
+      }
+      asAdmin = true;
     }
-    const asAdmin = game.admin_code_hash === hash;
 
     const user = await findOrCreateUserByName(game.id, firstName, lastName);
     const { error: memErr } = await supabase.from('memberships')
@@ -1360,18 +1378,7 @@ app.put('/api/games/:id/pairs', async (req, res) => {
 
 const FACE_TERM = '(photo)';
 const REMOVED_NAME = '(removed)';
-// Link codes: lowercase letters and digits only (so they survive any chat
-// app or keyboard), no look-alike characters, and always containing a letter
-// (the classic join-by-code route upper-cases what is typed, so a lowercase
-// code can never be matched there).
-const LINK_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
-function newLinkCode(prefix, n) {
-  const bytes = crypto.randomBytes(n);
-  let out = prefix;
-  for (let i = 0; i < n; i++) out += LINK_ALPHABET[bytes[i] % LINK_ALPHABET.length];
-  return out;
-}
-const MAX_PHOTO_BYTES = 300 * 1024;
+const MIN_PIN_LENGTH = 4;
 
 // Accepts a JPEG data URL (what the in-app cropper produces) and returns bare
 // base64, or throws a 400 the admin can act on.
@@ -1520,33 +1527,45 @@ app.delete('/api/games/:id/students/:pairId', async (req, res) => {
   } catch (e) { sendError(res, e); }
 });
 
-// POST /api/games/:id/links/reset  [admin]
-// A protected game is entered by link: /?k=<code>. The staff code lives in
-// games.share_code (so the app can show the invite link to members); the
-// admin code is only ever stored hashed, so it is returned here exactly once.
-// Resetting makes new codes and signs every device out (code_version bump);
-// the admin doing it gets a fresh token back and stays signed in.
-app.post('/api/games/:id/links/reset', async (req, res) => {
+// POST /api/games/:id/admin  body: { pin }
+// Turn the current session into an admin session (the "Admin" button in the
+// menu). Returns a fresh token carrying the admin claim.
+app.post('/api/games/:id/admin', async (req, res) => {
   try {
     const user = await requireUser(req);
     const game = req.game;
-    if (!req.isAdmin || !isProtected(game)) {
-      return res.status(403).json({ error: 'Only the admin can reset the links.' });
+    if (!isProtected(game)) return res.status(400).json({ error: 'This game has no admin PIN.' });
+    const pin = normalizePasscode(req.body?.pin);
+    if (!pin) return res.status(400).json({ error: 'Type the admin PIN.' });
+    if (await tooManyFailures(req, res)) return;
+    if (hashPasscode(pin) !== game.admin_code_hash) {
+      await recordFailure(req);
+      // 403, not 401: the session itself is fine (401 would sign them out).
+      return res.status(403).json({ error: 'That admin PIN is not right.' });
     }
-    const staffCode = newLinkCode('names', 8);
-    const adminCode = newLinkCode('admin', 12);
-    const [updated] = await expectWrite(
-      `reset links for game ${game.id}`,
+    const token = signSession({ u: user.id, g: game.id, cv: game.code_version, a: 1 });
+    res.json({ ok: true, token, isAdmin: true });
+  } catch (e) { sendError(res, e); }
+});
+
+// PUT /api/games/:id/pin  body: { pin }  [admin]
+// Change the admin PIN. Nobody is signed out.
+app.put('/api/games/:id/pin', async (req, res) => {
+  try {
+    const game = req.game;
+    if (!req.isAdmin || !isProtected(game)) {
+      return res.status(403).json({ error: 'Only the admin can change the PIN.' });
+    }
+    const pin = normalizePasscode(req.body?.pin);
+    if (pin.length < MIN_PIN_LENGTH) {
+      return res.status(400).json({ error: `The PIN needs at least ${MIN_PIN_LENGTH} numbers or letters.` });
+    }
+    await expectWrite(
+      `change admin PIN for game ${game.id}`,
       1,
-      supabase.from('games').update({
-        share_code: staffCode,
-        staff_code_hash: hashPasscode(staffCode),
-        admin_code_hash: hashPasscode(adminCode),
-        code_version: (game.code_version || 1) + 1,
-      }).eq('id', game.id).select('*'),
+      supabase.from('games').update({ admin_code_hash: hashPasscode(pin) }).eq('id', game.id).select('id'),
     );
-    const token = signSession({ u: user.id, g: updated.id, cv: updated.code_version, a: 1 });
-    res.json({ ok: true, token, game: publicGame(updated), adminCode });
+    res.json({ ok: true });
   } catch (e) { sendError(res, e); }
 });
 
